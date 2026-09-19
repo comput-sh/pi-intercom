@@ -1,6 +1,9 @@
 {
   "name": "@comput/pi-intercom",
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "repository": { "type": "git", "url": "git+https://github.com/mbundgaard/PiIntercom.git" },
+  "homepage": "https://github.com/mbundgaard/PiIntercom#readme",
+  "bugs": { "url": "https://github.com/mbundgaard/PiIntercom/issues" },
   "version": "0.1.0",
   "description": "Explicit local communication between Pi sessions; Pi orchestrates.",
   "type": "module",
@@ -9,7 +12,12 @@
   "files": ["src", "README.md", "references/v1-specification.md", "references/implementation-blocker.md"],
   "engines": { "node": ">=22" },
   "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
-  "devDependencies": { "typescript": "^5.9.3", "@types/node": "^22.0.0" },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.0.0",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "typebox": "1.3.7"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

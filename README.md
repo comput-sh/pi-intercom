@@ -96,7 +96,7 @@ Tool text output is bounded to 50 KiB/2000 lines. Full list data remains in the 
 ## Development and validation
 
 ```sh
-npm install --ignore-scripts
+npm ci
 npm run typecheck
 npm test
 npm run check:package
@@ -104,7 +104,15 @@ npm run check:package
 PI_INTERCOM_PI_ROOT='C:/path/to/pi-coding-agent' npm run test:host
 ```
 
-Production source runs through Pi's TypeScript loader; `npm run build` generates `dist` for tests. Pi core/typebox are peer dependencies, not bundled. This implementation run installed only cached development dependencies offline with `--legacy-peer-deps`, then used local ignored junctions to installed Pi/typebox for validation. No installed dependency, global setting or unrelated project was changed.
+Production source runs through Pi's TypeScript loader; `npm run build` generates `dist` for tests. Pi core/typebox are peer dependencies, not bundled; pinned development copies are included in the lockfile for reproducible CI without local junctions.
+
+## Publishing
+
+`.github/workflows/publish.yml` publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. Configure the npm trusted publisher as owner `mbundgaard`, repository `PiIntercom`, workflow `publish.yml`, with no environment.
+
+The workflow validates on Windows, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
+
+Version `0.1.0` is already published and cannot be republished. For the next release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Do not dispatch publishing for an already published version. CI validates pushes and pull requests separately without publishing.
 
 Tests use temporary directories, local test-only HTTP servers, and mocked Pi hosts/launch executors. They never start agents, tabs, terminals, contact models, services or bridges, or access credentials.
 
