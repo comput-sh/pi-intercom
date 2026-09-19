@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tgz
+# Machine-local Pi settings, credentials, and background task data
+.pi/
+.pi-intercom/*.tmp
+.pi-intercom/config.lock
+# Shared .pi-intercom/config.json is intentionally tracked.

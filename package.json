@@ -1,0 +1,20 @@
+{
+  "name": "@comput/pi-intercom",
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "version": "0.1.0",
+  "description": "Explicit local communication between Pi sessions; Pi orchestrates.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "files": ["src", "README.md", "references/v1-specification.md", "references/implementation-blocker.md"],
+  "engines": { "node": ">=22" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
+  "devDependencies": { "typescript": "^5.9.3", "@types/node": "^22.0.0" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test tests/core.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/extension.test.mjs",
+    "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
+    "check:package": "npm pack --dry-run --ignore-scripts"
+  }
+}
