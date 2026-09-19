@@ -11,8 +11,15 @@ test('Herdr uses one returned tab/pane, no split/focus, explicit extension/resum
   const r = await l.launch({ multiplexer: 'herdr', cwd: 'D:/project', sessionId: 'session-id' });
   assert.equal(r.registrationAwaited, false);
   assert.deepEqual(calls[0].args, ['tab', 'create', '--workspace', 'w1', '--cwd', 'D:/project', '--label', 'Intercom (anonymous)', '--no-focus']);
-  assert.ok(calls[1].args.includes('w1:p71'));
-  assert.deepEqual(calls[1].args.slice(-5), ['--', '-e', options.extension, '--session', 'session-id']);
+  assert.deepEqual(calls[1].args.slice(0, 3), ['pane', 'run', 'w1:p71']);
+  assert.equal(r.commandSubmitted, true);
+  assert.match(r.piReadiness, /not observed/);
+  const script = Buffer.from(calls[1].args[3].split(' ').at(-1), 'base64').toString('utf16le');
+  assert.match(script, /Get-Command pi\.ps1/);
+  assert.match(script, /'D:\/a space\/O''Brien\/index\.ts'/);
+  assert.match(script, /'--session' 'session-id'/);
+  assert.doesNotMatch(script, /Start-Process|HERDR_.*Remove/);
+  assert.ok(!calls.some(c => c.args[0] === 'agent'));
 });
 test('missing Herdr, resume failure and partial launch failure never fall back or clean up', async () => {
   const missing = launchers({ ...options, env: {}, run: async () => assert.fail('no command') });

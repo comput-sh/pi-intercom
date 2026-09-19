@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/mbundgaard/PiIntercom/issues"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Explicit local communication between Pi sessions; Pi orchestrates.",
   "type": "module",
   "keywords": [

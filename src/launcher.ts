@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fail } from './config.js';
 import type { LaunchRequest } from './runtime.js';
@@ -31,12 +30,15 @@ export function launchers(options: LauncherOptions) {
       catch (e) { fail(`Herdr tab launch failed: ${String(e)}; no fallback or cleanup`); }
       const pane = created.result?.root_pane?.pane_id, tab = created.result?.tab?.tab_id;
       if (!pane || !tab) fail('Herdr creation response missing returned pane/tab IDs; no guessed targeting or cleanup');
-      // Herdr requires a unique lowercase launcher alias. This is not Pi identity,
-      // is never stored in Intercom config/wire, and assigns no responsibility.
-      const alias = `intercom-${randomBytes(6).toString('hex')}`;
-      try { await exec('herdr', ['agent', 'start', alias, '--kind', 'pi', '--pane', pane, '--timeout', '30000', '--', ...args]); }
-      catch (e) { fail(`Herdr agent launch failed in tab ${tab}, pane ${pane}: ${String(e)}. Tab/process may remain; no automatic cleanup/retry/replacement`); }
-      return { launched: true, tab, pane, registrationAwaited: false };
+      // Herdr's Windows agent-start wrapper uses Start-Process on `pi`, which
+      // can resolve to a PowerShell shim and fail with invalid Win32 application.
+      // Run an explicit PowerShell command in the returned shell pane instead.
+      // This acknowledges command submission only, not Pi readiness/registration.
+      const script = `$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
+      const command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded(script)}`;
+      try { await exec('herdr', ['pane', 'run', pane, command]); }
+      catch (e) { fail(`Herdr Pi command submission failed in tab ${tab}, pane ${pane}: ${String(e)}. Tab/process may remain; no automatic cleanup/retry/replacement`); }
+      return { commandSubmitted: true, tab, pane, piReadiness: 'not observed; inspect pane for startup failures', registrationAwaited: false };
     }
     if (request.multiplexer !== 'none') fail('unsupported multiplexer');
     // Use encoded PowerShell rather than constructing cmd.exe command strings.

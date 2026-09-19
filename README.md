@@ -119,7 +119,7 @@ Tests use temporary directories, local test-only HTTP servers, and mocked Pi hos
 ### Not live-tested / remaining limitations
 
 - Actual Pi extension loading, idle/steering queue delivery, busy snapshots, session-name persistence, trust UI and session replacement/reload lifecycle with live Pi hosts.
-- Herdr tab creation, agent readiness, JSON response shapes, current-pane association and tab rename with live workers. Launcher CLI syntax was checked against installed help only. Herdr's temporary launcher alias is not Intercom/Pi identity and is not saved in config.
+- Complete Herdr create/register/configure/rename flow still needs end-to-end validation. The Windows launch path uses `herdr pane run` on the returned pane ID to invoke `pi.ps1` through explicitly encoded PowerShell, avoiding Herdr's failing `Start-Process pi` wrapper. Command submission is not agent readiness. This command path was live-tested in the previously failed tab: Pi started and registered successfully. No Herdr agent alias is needed.
 - Windows visible terminal/Pi process startup. Success only proves terminal creation, **not Pi readiness**; startup failures remain visible in that terminal. No live readiness handshake was added.
 - Actual persisted-session lookup and resumed worker startup; never-used session failure.
 - Cross-process/network-drive atomicity and Windows ACL/sharing failures (same-process temp-filesystem races are tested).
