@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore, directory, named, validateConfig } from '../dist/config.js';
@@ -64,6 +64,56 @@ test('loopback receipt, port fallback, rejection, body bound and no retry', asyn
   const res = await fetch(`http://127.0.0.1:${a.port}/intercom`, { method: 'POST', body: 'x'.repeat(BODY_LIMIT + 1) });
   assert.equal(res.status, 413);
   assert.equal(received, 2);
+});
+test('temporary write/sync/close failures preserve the original error and remove partial files', async t => {
+  const base = await fixture(t);
+  await base.initialize('c', 12345);
+  const original = await readFile(base.file, 'utf8');
+  for (const stage of ['writeFile', 'sync', 'close']) {
+    const failure = new Error(`injected ${stage} failure`);
+    class FaultStore extends ConfigStore {
+      async openTemporary(file) {
+        const handle = await super.openTemporary(file);
+        return {
+          writeFile: async data => { await handle.writeFile(data); if (stage === 'writeFile') throw failure; },
+          sync: async () => { if (stage === 'sync') throw failure; await handle.sync(); },
+          close: async () => { await handle.close(); throw stage === 'close' ? failure : new Error('secondary close failure'); },
+        };
+      }
+    }
+    const store = new FaultStore(base.root);
+    for (const operation of [() => store.update('c', c => { c.multiplexer = 'none'; }), () => store.initialize('other', 12346)]) {
+      await assert.rejects(operation(), error => error === failure);
+      assert.equal(await readFile(base.file, 'utf8'), original);
+      assert.deepEqual(await readdir(path.dirname(base.file)), ['config.json']);
+    }
+  }
+});
+test('lifecycle guard rejects queued mutation and rejects publication after temporary creation', async t => {
+  const s = await fixture(t); await s.initialize('c', 12345);
+  const original = await readFile(s.file, 'utf8');
+  let valid = true, mutated = false, release, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const blocker = s.update('c', async () => { entered(); await new Promise(resolve => { release = resolve; }); });
+  await started;
+  const guard = () => { if (!valid) throw new Error('lifecycle invalid'); };
+  const queued = s.update('c', () => { mutated = true; }, guard);
+  const rejected = assert.rejects(queued, /lifecycle invalid/);
+  valid = false; release(); await blocker; await rejected;
+  assert.equal(mutated, false);
+  class InvalidateOnClose extends ConfigStore {
+    async openTemporary(file) {
+      const handle = await super.openTemporary(file);
+      return { writeFile: data => handle.writeFile(data), sync: () => handle.sync(), close: async () => { await handle.close(); valid = false; } };
+    }
+  }
+  const store = new InvalidateOnClose(s.root);
+  valid = true;
+  await assert.rejects(store.update('c', c => { c.multiplexer = 'none'; }, guard), /lifecycle invalid/);
+  valid = true;
+  await assert.rejects(store.initialize('other', 12346, guard), /lifecycle invalid/);
+  assert.equal(await readFile(s.file, 'utf8'), original);
+  assert.deepEqual(await readdir(path.dirname(s.file)), ['config.json']);
 });
 test('receipt deadline bounds a stalled receiver and never retries', async t => {
   let count = 0;

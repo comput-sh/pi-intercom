@@ -1,5 +1,7 @@
 # Implementation progress — supported core delivered
 
+> **Historical initial-implementation snapshot.** Counts, environment details, and statements about no live workers, publishing or commits below describe that original run only. The snapshot is preserved unchanged below; [README](../README.md) records subsequent releases, observed 0.1.2 live behavior and current limitations. Do not use this snapshot as today's validation inventory.
+
 ## Implemented
 - Single TypeScript Pi extension: coordinator/anonymous/existing worker startup, explicit registration handoff, passive configure/reload separation, role/session/recipient gates, normal/steering delivery, independent status reports and current-port bookkeeping.
 - Upward config discovery, atomic no-replace initialization, serialized/atomic validated coordinator writes, case-insensitive names and canonical descendant-directory checks.

@@ -1,6 +1,6 @@
 # V1 cancellation capability blocked: Pi cancellation contract
 
-> **Current status:** The user subsequently approved implementing independent features. The supported core now exists; see `implementation-progress.md` and `../README.md`. Only stop/close remain disabled, failing before cancellation/shutdown. The historical feasibility report below is preserved as evidence; its statements that no implementation exists describe the earlier run, not current project status.
+> **Current status:** The user subsequently approved implementing independent features. The supported core now exists; see the [historical implementation snapshot](https://github.com/mbundgaard/PiIntercom/blob/main/references/implementation-progress.md) and [current README](../README.md). Stop/close remain disabled, failing before cancellation/shutdown; README also records the separate manual-compaction input-acceptance gap. The historical feasibility report below is preserved as evidence; its statements that no implementation exists describe the earlier run, not current project status.
 
 ## Historical outcome
 
@@ -40,7 +40,7 @@ No private-runtime access, repeated abort polling, synthetic Escape input, setti
 
 Added `tests/pi-cancellation-probe.test.mjs`, a dependency-free compatibility probe. It extracts selected installed methods and executes them with mocks; it does not construct a Pi session, read credentials, contact a model, bind a server, launch a process, or modify Herdr.
 
-Git Bash invocation:
+Git Bash invocation from a source checkout (the probe is not shipped in the npm package):
 
 ```bash
 PI_INTERCOM_PI_ROOT='C:/Users/martin/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent' \

@@ -74,41 +74,60 @@ export class ConfigStore {
       const parent = path.dirname(at); if (parent === at) return undefined; at = parent;
     }
   }
+  protected openTemporary(file: string) { return open(file, 'wx'); }
   private async temporary(config: Config): Promise<string> {
     validateConfig(config);
     await mkdir(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${randomUUID()}.tmp`;
-    const handle = await open(temp, 'wx');
-    try { await handle.writeFile(JSON.stringify(config, null, 2) + '\n'); await handle.sync(); }
-    finally { await handle.close(); }
-    return temp;
+    const handle = await this.openTemporary(temp);
+    try {
+      await handle.writeFile(JSON.stringify(config, null, 2) + '\n');
+      await handle.sync();
+      await handle.close();
+      return temp;
+    } catch (error) {
+      // Cleanup failures must not replace the original write/sync/close error.
+      await handle.close().catch(() => {});
+      await unlink(temp).catch(() => {});
+      throw error;
+    }
   }
-  async initialize(id: string, boundPort: number): Promise<boolean> {
+  async initialize(id: string, boundPort: number, assertValid: () => void = () => {}): Promise<boolean> {
     // Publish an already complete file using an atomic, no-replace hard link.
     // Losers only ever see complete JSON; unsupported filesystems fail explicitly.
+    assertValid();
     const temp = await this.temporary({ version: 1, multiplexer: 'herdr', agents: [{ sessionId: id, name: 'Coordinator', coordinator: true, description: DEFAULT_DESCRIPTION, port: boundPort, projectDirectory: '.' }] });
-    try { await link(temp, this.file); return true; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === 'EEXIST') { await this.read(); return false; } throw e; }
-    finally { await unlink(temp); }
+    try {
+      assertValid();
+      try { await link(temp, this.file); }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+        await this.read(); await unlink(temp); return false;
+      }
+      await unlink(temp); return true;
+    } catch (error) { await unlink(temp).catch(() => {}); throw error; }
   }
-  async update(id: string, mutate: (config: Config) => void | Promise<void>): Promise<Config> {
+  async update(id: string, mutate: (config: Config) => void | Promise<void>, assertValid: () => void = () => {}): Promise<Config> {
     const operation = this.tail.then(async () => {
-      const c = await this.read(); requireCoordinator(c, id);
-      await mutate(c); validateConfig(c);
+      assertValid();
+      const c = await this.read(); assertValid(); requireCoordinator(c, id);
+      await mutate(c); assertValid(); validateConfig(c);
       const temp = await this.temporary(c);
-      try { await rename(temp, this.file); }
-      finally { await unlink(temp).catch(e => { if (e.code !== 'ENOENT') throw e; }); }
+      try {
+        // Last check before publication; an already submitted OS rename cannot be undone.
+        assertValid(); await rename(temp, this.file);
+      } catch (error) { await unlink(temp).catch(() => {}); throw error; }
       return c;
     });
     this.tail = operation.catch(() => {}); return operation;
   }
-  async configure(id: string, values: Omit<Agent, 'coordinator'>): Promise<Config> {
+  async configure(id: string, values: Omit<Agent, 'coordinator'>, assertValid: () => void = () => {}): Promise<Config> {
     return this.update(id, async c => {
       if (values.sessionId === coordinator(c).sessionId) fail('cannot configure coordinator as worker');
       const projectDirectory = await directory(this.root, values.projectDirectory);
       const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);
       if (index < 0) c.agents.push(a); else c.agents[index] = a;
-    });
+    }, assertValid);
   }
 }

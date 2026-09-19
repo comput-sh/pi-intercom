@@ -1,6 +1,8 @@
 # PiIntercom V1 Specification
 
-This is the consolidated record of the agreed V1 design. It supersedes conflicting wording in the original architecture proposal and historical discussion notes. Implementation gaps are listed separately at the end; they are not silently approved decisions.
+This is the consolidated **target design**, authoritative over conflicting wording in the original proposal and historical discussion notes. It is not a claim that every capability is currently supported. See [README](../README.md) for current behavior, release evidence and validation limits.
+
+**Current capability exception:** `intercom_stop_worker` and `intercom_close_worker` are registered but disabled on every host, before cancellation/shutdown or outgoing control. Their intended guarantees below remain unchanged; see the [cancellation blocker](implementation-blocker.md). Manual-compaction delivery also has a known acceptance gap: HTTP receipt does not guarantee Pi accepted the input. Unresolved contract questions are not silently approved decisions.
 
 ## 1. Scope and principles
 
@@ -34,7 +36,7 @@ Required configuration information:
 | Agent | Pi session ID, name, coordinator flag, responsibility description, port |
 | Worker | Project directory relative to coordinator root |
 
-Exact schema and versioning remain implementation gaps. Do not treat a saved endpoint or session ID as proof that its process exists.
+The implemented schema is version 1; its fields and validation are documented in [README: Config and wire contracts](../README.md#config-and-wire-contracts). Do not treat a saved endpoint or session ID as proof that its process exists.
 
 ## 3. Startup and registration
 
@@ -122,12 +124,12 @@ Every invocation reads the current Pi session ID and shared config, determines r
 | `intercom_create_worker` | Coordinator | `projectDirectory?` (default `.`) | Launch new anonymous worker with extension loaded; report launch success/failure without awaiting registration |
 | `intercom_configure_worker` | Coordinator | `sessionId`, `port`, `projectDirectory`, `name`, `description` | Write the explicitly supplied worker configuration; no notification |
 | `intercom_reload_worker` | Coordinator | `to` (name) | Send config-read control only |
-| `intercom_send` | Both | `to` (name), `message` | Deliver agent prompt/steering; return send result, not agent reply |
-| `intercom_list` | Both | None | Reread config; list names, responsibilities, IDs, roles, ports, without live probing |
+| `intercom_send` | Configured, responsibility-loaded sessions | `to` (name), `message` | Deliver agent prompt/steering; return send result, not agent reply |
+| `intercom_list` | Configured sessions | None | Reread config; list names, responsibilities, IDs, roles, ports, without live probing |
 | `intercom_request_status` | Coordinator | `to` (name) | Ask worker extension to send independent runtime status report |
-| `intercom_report_status` | Worker | None | Invoke shared reporting function; reject on coordinator |
-| `intercom_stop_worker` | Coordinator | `to` (name) | Cancel current work; leave Pi and extension running |
-| `intercom_close_worker` | Coordinator | `to` (name) | Cancel work, gracefully exit Pi, preserve session/config |
+| `intercom_report_status` | Worker, including anonymous | None | Invoke shared reporting function; reject on coordinator |
+| `intercom_stop_worker` | Coordinator | `to` (name) | Target: cancel current work; leave Pi and extension running. Currently disabled; unsupported-host error |
+| `intercom_close_worker` | Coordinator | `to` (name) | Target: cancel work, gracefully exit Pi, preserve session/config. Currently disabled; unsupported-host error |
 | `intercom_resume_worker` | Coordinator | `to` (name) | Launch saved session using configured directory and launcher; failures leave config unchanged |
 | `intercom_remove_worker` | Coordinator | `to` (name) | Remove config entry only; no process stop or session-file deletion |
 | `intercom_set_multiplexer` | Coordinator | `multiplexer` | Set `herdr` or `none` for future launches, including resume |
@@ -137,7 +139,7 @@ Every invocation reads the current Pi session ID and shared config, determines r
 - Configure rejects duplicate names, including `Coordinator`, case-insensitively. Keeping a session's own name is allowed.
 - Configure and reload are deliberately separate. Reload is not Pi's extension-code reload, a process restart, cancellation, or a work assignment. Explain this in tool and user documentation.
 - Reload synchronizes Pi session and applicable Herdr tab names to config.
-- Stop/close use Pi cancellation and graceful shutdown; no force-kill, automatic commit, or rollback. Close does not require a separate stop call.
+- Target contract: stop/close use Pi cancellation and graceful shutdown; no force-kill, automatic commit, or rollback. Close does not require a separate stop call. **Currently both fail closed; no stop or shutdown is performed.**
 - Close success at transport level is not proof that process exit has completed.
 - Remove a running worker only after explicitly closing it; removal itself never closes it.
 - Resume failure must be surfaced; no implicit removal, replacement, or reassignment.
@@ -163,14 +165,14 @@ Every invocation reads the current Pi session ID and shared config, determines r
 
 ## 9. Remaining implementation gaps — not new approved behavior
 
-Consolidate these before coding; avoid reopening settled user flows.
+Original design-gap inventory with current implementation annotations. Avoid reopening settled user flows. Implemented mechanisms are not proof of comprehensive live-host validation.
 
 1. **Registration handoff — resolved:** deliver reported session ID, port, and project directory into the coordinator Pi context. The coordinator agent decides what to do and supplies all values explicitly to configure_worker. No hidden pending-registration map, placeholder entry, or automatic configuration/reload workflow.
 2. **Retrying anonymous registration:** status reports do not create registrations. Define an explicit way to repeat a failed initial registration without conflating it with known-worker status.
-3. **Wire/config schemas:** finalize schema version, field names, control types, message envelope, validation, body limits, optional message IDs and receipt acknowledgment boundary. No synchronous agent reply semantics.
+3. **Wire/config schemas — implemented:** schema version 1, documented fields/control kinds, validation, 64 KiB body bound and extension-receipt acknowledgment are described in README. No message IDs, deduplication or synchronous agent replies. Receipt is not proof of Pi input acceptance or model completion.
 4. **Pi lifecycle APIs:** verify extension loading, session-ID resume lookup, cancellation, queued-message treatment on stop/close, busy detection, and session-switch cleanup. Stop must not unexpectedly restart queued work; exact API feasibility needs checking.
 5. **Launch integration:** verify installed Herdr operations and a Windows visible-terminal implementation, including readiness/launch-failure observability and tab association. A successful process launch is not worker registration success.
-6. **Configuration writes:** implement safe serialized/atomic coordinator writes and first-creation race handling. Define bounded handling of incomplete initialization. No malformed-file overwrites.
+6. **Configuration writes — implemented, validation limits remain:** serialized atomic updates and complete-file no-replace initial publication; invalid config is not overwritten. See README for filesystem assumptions and unverified cross-process/network-drive cases.
 7. **Missing coordinator session:** workers report connection failure and remain reachable. Explicit coordinator takeover is not specified or approved; do not invent it.
 8. **Unconfigured worker permissions:** explicitly define allowed worker-side tools before its entry exists, while retaining registration/reporting ability and forbidding coordinator operations.
 9. **Protocol control checks:** distinguish initial registration from configured-sender validation. Reload must reach the anonymous worker after the coordinator has created its entry.
@@ -180,4 +182,4 @@ Consolidate these before coding; avoid reopening settled user flows.
 - Read installed Pi documentation and relevant Herdr skills before implementation.
 - Document tool permissions, startup/registration flow, passive responsibility loading, separate configure/reload calls, and failure semantics.
 - Test role gates, port fallback, recipient mismatch, duplicate names, config errors, explicit recovery, and asynchronous steering/status paths.
-- No implementation code has been produced during this design discussion.
+- The original design discussion produced no implementation code. A supported-core implementation and releases now exist; current evidence and limitations are maintained in README.

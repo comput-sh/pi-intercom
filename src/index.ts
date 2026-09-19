@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { Type, type TSchema } from 'typebox';
-import { SessionManager, truncateHead, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { launchers } from './launcher.js';
@@ -21,10 +22,21 @@ const tools: [string, string, TSchema][] = [
   ['set_multiplexer', 'Coordinator only. Set herdr (default) or none (separate visible Windows terminals) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
 
+// Launchers pass no --session-dir. Match child Pi's env > per-cwd settings >
+// default lookup, resolving relative paths against the child's cwd, not ours.
+// SettingsManager's public getter applies Pi's own path/tilde normalization.
+export function resumeSessionDirectory(cwd: string, envSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR, agentDir = getAgentDir()): string | undefined {
+  const settings = envSessionDir
+    ? SettingsManager.inMemory({ sessionDir: envSessionDir })
+    : SettingsManager.create(cwd, path.resolve(cwd, agentDir));
+  const sessionDir = settings.getSessionDir();
+  return sessionDir ? path.resolve(cwd, sessionDir) : undefined;
+}
+
 // Participate in Pi's own per-file mutation queue as well as Intercom serialization.
 class PiConfigStore extends ConfigStore {
-  override update(id: string, mutate: Parameters<ConfigStore['update']>[1]) {
-    return withFileMutationQueue(this.file, () => super.update(id, mutate));
+  override update(id: string, mutate: Parameters<ConfigStore['update']>[1], assertValid?: () => void) {
+    return withFileMutationQueue(this.file, () => super.update(id, mutate, assertValid));
   }
 }
 export default function intercomExtension(pi: ExtensionAPI): void {
@@ -32,7 +44,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   const launcher = launchers({
     extension: fileURLToPath(import.meta.url),
-    sessionExists: async (cwd, id) => (await SessionManager.list(cwd, process.env.PI_CODING_AGENT_SESSION_DIR)).some(s => s.id === id),
+    sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
   });
   pi.on('session_start', async (_event, ctx) => {
     await runtime?.close(); context = ctx;

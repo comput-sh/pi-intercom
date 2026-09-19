@@ -1,5 +1,7 @@
 # Multi-Agent Development Architecture — Proposed Solution
 
+> **Historical proposal, not the current contract or usage guide.** The [V1 target specification](v1-specification.md) supersedes this proposal; [README](../README.md) describes supported behavior. In particular, V1 uses Pi session IDs and anonymous registration, not the illustrative bootstrap flags below. Intercom communicates while Pi assigns work; durable journals, automatic lifecycle transitions and peer-introduction requirements below are not implemented V1 requirements. Completion means report and wait, not autonomous exit. Stop/close are currently disabled.
+
 ## Goal
 
 Build a lightweight coordination layer for multiple Pi coding-agent instances so they can work together across research, implementation, testing, review, and multi-project changes without depending on terminal history or a specific terminal multiplexer.
