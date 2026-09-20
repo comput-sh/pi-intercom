@@ -55,6 +55,30 @@ test('anonymous registration explicitly hands ID/port/directory to agent, config
   await c.runtime.tool('reload_worker', { to: 'bUILDER' });
   assert.equal(w.runtime.responsibility.description, 'Remit'); assert.deepEqual(w.names, ['Builder']); assert.equal(w.messages.length, 0);
 });
+test('dashboard port persistence is coordinator-only and list derives a passive saved URL for both roles', async t => {
+  const { c, w, wire } = await configured(t);
+  const original = await c.runtime.store.read(), before = wire.length;
+  for (const runtime of [c.runtime, w.runtime]) {
+    assert.deepEqual(await runtime.tool('list', {}), { ...original, dashboardUrl: null });
+  }
+  await assert.rejects(w.runtime.recordDashboardPort(42000), /permission/);
+  await assert.rejects(c.runtime.recordDashboardPort(0), /invalid port/);
+  assert.deepEqual(await c.runtime.store.read(), original);
+  await c.runtime.recordDashboardPort(42000);
+  const saved = await c.runtime.store.read();
+  assert.equal(saved.agents.find(a => a.coordinator).dashboardPort, 42000);
+  assert.equal(saved.dashboardUrl, undefined);
+  assert.deepEqual(saved.agents.filter(a => !a.coordinator), original.agents.filter(a => !a.coordinator));
+  for (const runtime of [c.runtime, w.runtime]) {
+    assert.deepEqual(await runtime.tool('list', {}), { ...saved, dashboardUrl: 'http://127.0.0.1:42000/' });
+  }
+  await c.runtime.recordDashboardPort(43000);
+  assert.equal((await w.runtime.tool('list', {})).dashboardUrl, 'http://127.0.0.1:43000/');
+  await c.runtime.close();
+  assert.equal((await w.runtime.tool('list', {})).dashboardUrl, 'http://127.0.0.1:43000/');
+  assert.equal((await w.runtime.store.read()).agents[0].dashboardPort, 43000);
+  assert.equal(wire.length, before, 'discovery must not probe, notify, or send transport messages');
+});
 test('idle/steering messages and independent status reports share reporting without worker turn', async t => {
   const { c, w, wire } = await configured(t);
   await c.runtime.tool('send', { to: 'Builder', message: 'Implement the assigned task' });
@@ -153,7 +177,7 @@ test('close or session switch during directory resolution prevents create/resume
   }
 });
 test('close invalidates queued coordinator tool and status writes', async t => {
-  for (const operation of ['configure_worker', 'set_multiplexer', 'remove_worker', 'status']) {
+  for (const operation of ['configure_worker', 'set_multiplexer', 'remove_worker', 'status', 'dashboard_port']) {
     const { c } = await configured(t);
     const store = c.runtime.store, original = await store.read();
     let release, entered, queued;
@@ -165,6 +189,7 @@ test('close invalidates queued coordinator tool and status writes', async t => {
     store.update = (...args) => { queued(); return update(...args); };
     const pending = operation === 'status'
       ? c.runtime.receive({ version: 1, kind: 'status', from: 'w', to: 'c', payload: { port: 49999, busy: false } })
+      : operation === 'dashboard_port' ? c.runtime.recordDashboardPort(42000)
       : c.runtime.tool(operation, { to: 'Builder', multiplexer: 'none', sessionId: 'w2', name: 'Other', port: 40001, projectDirectory: '.', description: 'Other remit' });
     const rejected = assert.rejects(pending, /inactive|replaced/);
     await reachedQueue;

@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/mbundgaard/PiIntercom/issues"
   },
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Explicit local communication between Pi sessions; Pi orchestrates.",
   "type": "module",
   "keywords": [
@@ -25,7 +25,9 @@
   },
   "files": [
     "src",
+    "dashboard",
     "README.md",
+    "references/observability.md",
     "references/v1-specification.md",
     "references/implementation-blocker.md"
   ],
@@ -45,7 +47,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/core.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs",
+    "test": "npm run build && node --test tests/core.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/dashboard.test.mjs tests/dashboard-security.test.mjs tests/observability-integration.test.mjs",
     "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
     "check:package": "npm pack --dry-run --ignore-scripts"
   }

@@ -5,6 +5,7 @@ import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMut
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { launchers } from './launcher.js';
+import { startDashboard, type Dashboard } from './dashboard.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
 const tools: [string, string, TSchema][] = [
@@ -42,11 +43,15 @@ class PiConfigStore extends ConfigStore {
 export default function intercomExtension(pi: ExtensionAPI): void {
   let runtime: Intercom | undefined;
   let context: ExtensionContext | undefined;
+  let dashboard: Dashboard | undefined;
+  let generation = 0;
   const launcher = launchers({
     extension: fileURLToPath(import.meta.url),
     sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
   });
   pi.on('session_start', async (_event, ctx) => {
+    const started = ++generation;
+    await dashboard?.close(); dashboard = undefined;
     await runtime?.close(); context = ctx;
     if (process.platform !== 'win32' || ctx.mode !== 'tui') throw new Error('PiIntercom V1 requires Windows interactive Pi. No resources started.');
     if (!ctx.isProjectTrusted()) throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
@@ -58,10 +63,43 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
       notify: text => ctx.ui.notify(text, 'info'),
     }, { launch: launcher.launch, store: root => new PiConfigStore(root) });
-    try { await runtime.start(); }
-    catch (e) { runtime = undefined; ctx.ui.notify(String(e), 'error'); }
+    const current = runtime;
+    try { await current.start(); }
+    catch (e) { if (runtime === current) runtime = undefined; ctx.ui.notify(String(e), 'error'); return; }
+    if (started !== generation) return;
+    let server: Dashboard | undefined;
+    let savingPort = false;
+    try {
+      if ((await current.state()).me?.coordinator) {
+        server = await startDashboard(current.store.root);
+        if (started !== generation) { await server.close(); return; }
+        savingPort = true;
+        await current.recordDashboardPort(server.port);
+        if (started !== generation) { await server.close(); return; }
+        dashboard = server;
+        ctx.ui.notify(`Intercom read-only dashboard: ${server.url} (saved URL is last-known, not live availability)`, 'info');
+      }
+    } catch {
+      await server?.close().catch(() => {});
+      if (started !== generation) return;
+      ctx.ui.notify(savingPort
+        ? 'Intercom dashboard port could not be saved; the new dashboard was closed. Any saved URL is last-known only. Messaging remains available.'
+        : 'Intercom dashboard unavailable; communication remains independent.', 'error');
+    }
   });
-  pi.on('session_shutdown', async () => { await runtime?.close(); runtime = undefined; context = undefined; });
+  pi.on('session_shutdown', async () => {
+    generation++;
+    await dashboard?.close(); dashboard = undefined;
+    await runtime?.close(); runtime = undefined; context = undefined;
+  });
+  pi.on('agent_start', async (_event, ctx) => {
+    context = ctx;
+    runtime?.recordObservation('host.activity', { busy: !ctx.isIdle(), outcome: 'started' });
+  });
+  pi.on('agent_settled', async (_event, ctx) => {
+    context = ctx;
+    runtime?.recordObservation('host.activity', { busy: !ctx.isIdle(), outcome: 'settled' });
+  });
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;
     if (!runtime) return;

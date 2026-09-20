@@ -10,11 +10,14 @@ export interface Envelope {
   from: string;
   to: string;
   payload: Record<string, unknown>;
+  /** Optional diagnostics correlation only; never authentication or agent identity. */
+  correlationId?: string;
 }
 export function envelope(value: unknown): Envelope {
   const m = value as Envelope;
   if (!m || m.version !== 1 || !['message', 'registration', 'status', 'request_status', 'reload', 'stop', 'close'].includes(m.kind)) fail('invalid wire schema/version/kind');
   text(m.from, 'sender sessionId', 256); text(m.to, 'recipient sessionId', 256);
+  if (m.correlationId !== undefined && (typeof m.correlationId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(m.correlationId))) fail('invalid correlation ID');
   if (!m.payload || Array.isArray(m.payload) || typeof m.payload !== 'object') fail('invalid payload');
   if (m.kind === 'message') text(m.payload.message, 'message', 48000);
   if (m.kind === 'registration' || m.kind === 'status') port(m.payload.port);

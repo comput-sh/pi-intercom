@@ -8,6 +8,8 @@ export interface Agent {
   coordinator: boolean;
   description: string;
   port: number;
+  /** Last bound dashboard port, coordinator only; not evidence of a live server. */
+  dashboardPort?: number;
   projectDirectory: string;
 }
 export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
@@ -33,6 +35,10 @@ export function validateConfig(value: unknown): Config {
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
+    if (a.dashboardPort !== undefined) {
+      if (!a.coordinator) fail('dashboardPort is coordinator-only');
+      port(a.dashboardPort);
+    }
     if (names.has(key(a.name)) || ids.has(a.sessionId)) fail('duplicate name or session ID');
     names.add(key(a.name)); ids.add(a.sessionId);
     if (a.coordinator ? (a.name !== 'Coordinator' || a.projectDirectory !== '.') : key(a.name) === 'coordinator') fail('reserved Coordinator identity');

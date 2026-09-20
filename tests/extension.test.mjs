@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
-import { mkdtemp, rm, access, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, access, writeFile, readFile } from 'node:fs/promises';
+import { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore } from '../dist/config.js';
 import { listen, send } from '../dist/transport.js';
+import { readDashboardSnapshot } from '../dist/dashboard.js';
 
 // These exercise the real Windows-only adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
@@ -40,7 +42,7 @@ test('single extension registers all agreed tools without starting resources in 
   const tools = new Map(), events = new Map();
   extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
   assert.equal(tools.size, 12);
-  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'before_agent_start']);
+  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'agent_start', 'agent_settled', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
@@ -112,6 +114,105 @@ test('adapter anonymous configure/reload loads responsibility without a work tur
   await send(workerPort, { ...control, kind: 'message', payload: { message: 'Explicit review task' } });
   assert.equal(a.messages.length, 1);
   assert.match(a.messages[0].content, /Explicit review task/);
+});
+
+test('adapter activity hooks record snapshots only and coordinator dashboard shuts down with session', windowsOnly, async t => {
+  const a = await adapter(t); await a.start();
+  const notice = a.notices.find(item => item.text.includes('read-only dashboard:'));
+  assert.ok(notice);
+  const url = notice.text.match(/http:\/\/127\.0\.0\.1:\d+\//)[0];
+  assert.equal((await fetch(`${url}api/snapshot`)).status, 200);
+  const store = new ConfigStore(a.root), config = await store.read();
+  assert.equal(config.agents.find(agent => agent.coordinator).dashboardPort, Number(new URL(url).port));
+  const list = JSON.parse((await a.invoke('list')).content[0].text);
+  assert.equal(list.dashboardUrl, url);
+  a.setIdle(false);
+  await a.events.get('agent_start')({ message: 'PRIVATE_EVENT_BODY' }, a.ctx);
+  a.setIdle(true);
+  await a.events.get('agent_settled')({ message: 'PRIVATE_EVENT_BODY' }, a.ctx);
+  assert.equal(a.messages.length, 0, 'activity telemetry must not prompt a worker');
+  await a.events.get('session_shutdown')();
+  await assert.rejects(fetch(`${url}api/snapshot`));
+  const snapshot = await readDashboardSnapshot(a.root);
+  const activity = snapshot.events.filter(event => event.event === 'host.activity');
+  assert.deepEqual(activity.map(event => [event.outcome, event.busy]), [['started', true], ['settled', false]]);
+  assert.doesNotMatch(JSON.stringify(snapshot.events), /PRIVATE_EVENT_BODY|task\.completed/);
+});
+
+test('adapter failed dashboard-port persistence closes dashboard without false readiness or lost communication', windowsOnly, async t => {
+  const a = await adapter(t), bound = [];
+  const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
+  ConfigStore.prototype.update = function(id, mutate, guard) {
+    return originalUpdate.call(this, id, async config => {
+      await mutate(config);
+      if (config.agents.some(agent => agent.dashboardPort !== undefined)) throw new Error('injected dashboard persistence failure');
+    }, guard);
+  };
+  Server.prototype.listen = function(...args) {
+    this.once('listening', () => { const address = this.address(); if (address && typeof address !== 'string') bound.push(address.port); });
+    return originalListen.apply(this, args);
+  };
+  try { await a.start(); }
+  finally { ConfigStore.prototype.update = originalUpdate; Server.prototype.listen = originalListen; }
+  assert.equal(bound.length, 2, 'both communication and dashboard bound test-only loopback ports');
+  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
+  assert.ok(a.notices.some(notice => /dashboard port could not be saved/i.test(notice.text)));
+  const config = await new ConfigStore(a.root).read();
+  assert.equal(config.agents[0].dashboardPort, undefined);
+  const dashboardPort = bound.find(port => port !== config.agents[0].port);
+  await assert.rejects(fetch(`http://127.0.0.1:${dashboardPort}/api/snapshot`));
+  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives dashboard persistence failure' });
+  assert.equal(a.messages.length, 1);
+});
+
+test('adapter dashboard bind failure preserves legacy config and communication without claiming a URL', windowsOnly, async t => {
+  const a = await adapter(t), originalListen = Server.prototype.listen;
+  let listens = 0;
+  Server.prototype.listen = function(...args) {
+    if (++listens === 2) throw Object.assign(new Error('injected dashboard bind failure'), { code: 'EACCES' });
+    return originalListen.apply(this, args);
+  };
+  try { await a.start(); } finally { Server.prototype.listen = originalListen; }
+  assert.equal(listens, 2);
+  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
+  assert.equal((await new ConfigStore(a.root).read()).agents[0].dashboardPort, undefined);
+  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives dashboard bind failure' });
+  assert.equal(a.messages.length, 1);
+});
+
+test('adapter shutdown during pending dashboard-port persistence cannot publish readiness or leave dashboard listening', windowsOnly, async t => {
+  const a = await adapter(t), bound = [];
+  const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
+  let entered, release;
+  const pendingWrite = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  ConfigStore.prototype.update = function(id, mutate, guard) {
+    return originalUpdate.call(this, id, async config => {
+      await mutate(config);
+      if (config.agents.some(agent => agent.dashboardPort !== undefined)) { entered(); await gate; }
+    }, guard);
+  };
+  Server.prototype.listen = function(...args) {
+    this.once('listening', () => { const address = this.address(); if (address && typeof address !== 'string') bound.push(address.port); });
+    return originalListen.apply(this, args);
+  };
+  let starting;
+  try {
+    starting = a.start();
+    await pendingWrite;
+    await a.events.get('session_shutdown')();
+    release(); await starting;
+  } finally {
+    release();
+    ConfigStore.prototype.update = originalUpdate; Server.prototype.listen = originalListen;
+    await starting;
+  }
+  assert.equal(bound.length, 2);
+  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
+  const saved = JSON.parse(await readFile(new ConfigStore(a.root).file, 'utf8'));
+  assert.equal(saved.agents[0].dashboardPort, undefined);
+  for (const port of bound) await assert.rejects(fetch(`http://127.0.0.1:${port}/api/snapshot`));
+  await assert.rejects(a.invoke('list'), /not initialized/);
 });
 
 test('adapter name-sync startup failure retains endpoint, malformed config startup reports failure', windowsOnly, async t => {

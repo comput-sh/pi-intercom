@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>PiIntercom · Observation ledger</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#timeline">Skip to event timeline</a>
+  <header class="masthead">
+    <div><p class="eyebrow">PiIntercom / Local observation</p><h1>Communication, observed.</h1>
+      <p class="intro">A read-only record of agents and their exchanges. Pi decides the work.</p></div>
+    <div class="connection"><span id="connection-state" role="status">Connecting to local dashboard…</span><p id="snapshot-time">No snapshot received</p><span class="read-only">Read only · Refreshes every 3 seconds</span></div>
+  </header>
+  <main>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <div class="workspace">
+      <section class="roster-panel" aria-labelledby="roster-heading">
+        <div class="section-heading"><h2 id="roster-heading">Configured agents</h2><span id="roster-count" class="count">—</span></div>
+        <p class="help">Saved endpoints are not proof of a running process. Busy and idle are last-observed snapshots, not availability.</p>
+        <div id="roster" class="roster"><p class="empty">Waiting for the saved roster.</p></div>
+      </section>
+      <section id="timeline" class="timeline-panel" aria-labelledby="timeline-heading" tabindex="-1">
+        <div class="section-heading"><h2 id="timeline-heading">Exchange ledger</h2><span id="event-count" class="count">—</span></div>
+        <p class="help">Metadata only. Receipt does not prove Pi accepted the input or completed work.</p>
+        <form class="filters" aria-label="Filter event timeline">
+          <div><label for="worker-filter">Agent</label><select id="worker-filter"><option value="">All agents</option></select></div>
+          <div><label for="type-filter">Event type</label><select id="type-filter"><option value="">All types</option></select></div>
+          <label class="checkbox"><input id="errors-filter" type="checkbox">Errors only</label>
+        </form>
+        <p id="event-window" class="window-note">Waiting for event metadata.</p>
+        <div id="events" class="events"><p class="empty">The ledger will appear after the first snapshot.</p></div>
+      </section>
+    </div>
+  </main>
+  <footer><strong>Observe, don't infer.</strong> A quiet timeline may mean no recent events, unavailable logging, or an unreachable dashboard—not completed work. No assignments or agent controls are available here.</footer>
+</body>
+</html>

@@ -50,6 +50,26 @@ test('schema rejects malformed version, port, duplicate IDs, traversal', async t
   }
   assert.throws(() => envelope({ version: 1, kind: 'status', from: 'w', to: 'c', payload: { port: 1, busy: 'yes' } }));
 });
+test('optional dashboardPort accepts legacy/coordinator entries and rejects invalid or worker values without repair', async t => {
+  const s = await fixture(t); await s.initialize('c', 12345);
+  await s.configure('c', worker());
+  const original = await s.read();
+  assert.equal(validateConfig(original).agents[0].dashboardPort, undefined);
+  for (const value of [1, 65535]) {
+    const candidate = structuredClone(original); candidate.agents[0].dashboardPort = value;
+    assert.equal(validateConfig(candidate).agents[0].dashboardPort, value);
+  }
+  for (const value of [0, 65536, -1, 1.5, null, '12345']) {
+    const candidate = structuredClone(original); candidate.agents[0].dashboardPort = value;
+    assert.throws(() => validateConfig(candidate), /invalid port/);
+  }
+  const invalidWorker = structuredClone(original); invalidWorker.agents[1].dashboardPort = 12345;
+  assert.throws(() => validateConfig(invalidWorker), /coordinator-only/);
+  const invalidJson = JSON.stringify(invalidWorker);
+  await writeFile(s.file, invalidJson);
+  await assert.rejects(s.update('c', c => { c.agents[0].dashboardPort = 54321; }), /coordinator-only/);
+  assert.equal(await readFile(s.file, 'utf8'), invalidJson);
+});
 test('loopback receipt, port fallback, rejection, body bound and no retry', async t => {
   let received = 0;
   const a = await listen(undefined, async m => { received++; if (m.to !== 'a') throw new Error('recipient mismatch'); });

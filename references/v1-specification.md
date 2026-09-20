@@ -96,7 +96,7 @@ No worker-specific config path, callback address, instance ID, or preassigned re
 - Include sender identity and label agent messages with sender and purpose.
 - Incoming coordinator-only controls check sender session ID against current config. This is role validation, not authentication.
 - Receipt timeout is 5 seconds. No automatic retries. A failure or timeout is reported; the agent decides recovery.
-- Dedicated durable message logging is deferred until the basic system works.
+- Dedicated durable message logging is deferred. A subsequently approved, separate scope adds best-effort metadata telemetry and a coordinator-only read-only dashboard; see [observability](observability.md). This is not a durable inbox, task journal, replay mechanism, completion guarantee or orchestration layer.
 
 ### Agent delivery
 
@@ -158,7 +158,7 @@ Every invocation reads the current Pi session ID and shared config, determines r
 ## 8. Explicitly deferred
 
 - Other operating systems and multiplexers.
-- Durable message logging, including storage/retention policy.
+- Durable message/task journals and replay remain deferred. The newly approved [metadata-only observation feature](observability.md) has bounded best-effort storage/retention, not durable-delivery guarantees.
 - Duplicate Pi-session activation detection or session-ID locks.
 - Automatic retry queues and recovery orchestration are not V1 behavior.
 - Bulk tools: use individual operations instead.

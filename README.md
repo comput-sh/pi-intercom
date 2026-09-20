@@ -56,7 +56,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description` | Coordinator; all five explicit fields, writes only |
 | `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
-| `intercom_list` | None | Configured sessions; saved state only, never live health |
+| `intercom_list` | None | Configured coordinator/workers; saved roster and derived `dashboardUrl`, never live health |
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
 | `intercom_stop_worker`, `intercom_close_worker` | `to` (worker name) | Coordinator role checked, then **unsupported-host error**, no side effects |
@@ -87,6 +87,8 @@ Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore
 }
 ```
 
+Version 0.2.0 dashboard support adds optional `dashboardPort` (integer 1–65535) on the **coordinator entry only**. Older config without it remains valid; workers cannot have it. This is separate from each agent's messaging `port`. `intercom_list` keeps `version`, `multiplexer` and `agents`, and adds top-level `dashboardUrl`: `http://127.0.0.1:<saved dashboardPort>/`, or `null` when no dashboard port is saved. It reads saved config without probing or starting a dashboard; the URL is last-known, not a liveness claim.
+
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
 Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
@@ -101,7 +103,19 @@ Kinds: `message`, `registration` (`port`, `projectDirectory`), `status` (`port`,
 
 `202 {"accepted":true}` means Intercom extension receipt/dispatch, **not guaranteed Pi input acceptance, queueing, or model completion**. In Pi 0.84.4, `sendUserMessage` can reject during manual compaction after Intercom has acknowledged receipt: its void extension API reports the asynchronous rejection only as a local host error. Intercom has no delivery queue or retry to repair this gap; inspect the recipient's local error and arrange an explicit resend after compaction if needed. Replacing it with `sendMessage` is not a safe workaround because that path can start a concurrent run. Invalid/unsupported requests return an error; excessive bodies return 413. Request-status sends its report separately after accepting control. Delivery is normal when idle and steering when busy, sampled at arrival. It does not hard-interrupt an executing tool. Each send resolves the recipient again from config; 5-second receipt deadline, **no retries**. Timeout means unknown outcome, not proof of nondelivery. No durable inbox, deduplication or replay log in V1.
 
-Tool text output is bounded to 50 KiB/2000 lines. Full list data remains in the shared config file. Name sync errors are surfaced; startup retains the useful endpoint, and explicit reload reports failure (Pi name/responsibility may already have changed before a Herdr tab rename fails).
+Version 0.2.0 telemetry adds an optional envelope `correlationId` for one transport attempt; legacy envelopes without it remain accepted. It is not agent identity, deduplication, a task ID, or a reply/completion guarantee.
+
+Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains in the shared config file; `dashboardUrl` is derived for list output. Name sync errors are surfaced; startup retains the useful endpoint, and explicit reload reports failure (Pi name/responsibility may already have changed before a Herdr tab rename fails).
+
+## Local observation dashboard (0.2.0)
+
+Current source adds metadata-only event logs and a coordinator-only, read-only localhost dashboard. Startup binds an OS-assigned port, then saves the actual port as the coordinator's `dashboardPort` and prints the local URL. Configured coordinator and worker sessions can retrieve the saved URL using `intercom_list`—no new dashboard tool or control. Open that URL in a local browser. The saved address can remain stale after shutdown or failure; it is not proof of reachability. Workers log metadata but do not start a dashboard. No browser opens automatically, and no agent controls, assignments or automatic recovery are added.
+
+The roster shows saved names/responsibilities/endpoints plus **last-observed** busy/idle, timestamp and age. Evidence older than 60 seconds is marked stale, never offline; missing evidence is unknown. The timeline refreshes approximately every three seconds and can be filtered by agent, event type and errors. Expand events for safe metadata/correlation, not prompt bodies. A disconnected dashboard retains old data with an explicit warning.
+
+Logs under `.pi-intercom/logs/` exclude message bodies and raw errors; roster responsibility text still comes from shared config, so do not put secrets there. `writerId` identifies an ephemeral log writer, not an agent; Pi session ID remains agent identity. Transport `correlationId` identifies one send attempt, not a task or completion. Logging is bounded/best effort and does not change HTTP receipt semantics or repair manual-compaction rejection. Never interpret a quiet timeline as completed work.
+
+See [observability reference](references/observability.md) for privacy, rotation/retention limits, partial-error semantics and the HTTP boundary. This feature requires **version 0.2.0 or later**; update the package and reload each participating Pi session to activate it. The dashboard is not a durable inbox, replay log or task journal.
 
 ## Development and validation
 
@@ -131,6 +145,8 @@ Published versions are immutable. For a new release, bump package and lockfile v
 - [v0.1.1](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.1): successful npm OIDC [run 35466923379](https://github.com/mbundgaard/PiIntercom/actions/runs/35466923379).
 - [v0.1.2](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.2): successful npm OIDC [run 35467586052](https://github.com/mbundgaard/PiIntercom/actions/runs/35467586052). Fixes Windows Herdr launching by using `herdr pane run` on the returned pane ID with encoded PowerShell invoking `pi.ps1`, instead of the failing `Start-Process pi` wrapper. No Herdr agent alias is needed.
 
+- [v0.1.3](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.3): successful npm OIDC [run 35474304380](https://github.com/mbundgaard/PiIntercom/actions/runs/35474304380). Contains the fixes below, not the observability feature added in 0.2.0.
+
 ### 0.1.3 changes and verification
 
 Version 0.1.3 includes these fixes (not present in 0.1.2):
@@ -139,7 +155,15 @@ Version 0.1.3 includes these fixes (not present in 0.1.2):
 - Failed temporary-file write, sync or close attempts best-effort close/unlink cleanup while preserving the primary error. Filesystem cleanup failures can still leave temporary files.
 - Resume preflight now follows the child session-storage context: `PI_CODING_AGENT_SESSION_DIR`, then target-project/global `sessionDir` settings, then Pi's default. Relative storage paths resolve against the target working directory. Launchers do not propagate the coordinator's CLI `--session-dir`; no machine-specific session path is stored in shared config. A static persisted-session fixture and mocked launcher validate lookup, not live resumed-worker startup.
 
-Coordinator validation of this source snapshot: `npm run typecheck` PASS; `npm test` **36/36**, no failures; `npm run check:package` PASS; `git diff --check` PASS (line-ending warnings only). Quality independently confirmed typecheck and all 36 tests, with no remaining actionable regression identified in these fixes. Tests include actual extension-adapter event handling against a mocked Pi API/context and runtime-to-runtime loopback HTTP; they do not establish real Pi queue or compaction behavior.
+Pre-observability fix milestone: coordinator validation recorded `npm run typecheck` PASS; `npm test` **36/36**, no failures; `npm run check:package` PASS; `git diff --check` PASS (line-ending warnings only). Quality independently confirmed typecheck and all 36 tests, with no remaining actionable regression identified in those fixes. This count predates the logging/dashboard changes; it is not their aggregate validation. Tests include actual extension-adapter event handling against a mocked Pi API/context and runtime-to-runtime loopback HTTP; they do not establish real Pi queue or compaction behavior.
+
+### 0.2.0 observability validation
+
+Coordinator and Quality independently ran `npm run typecheck && npm test`: **63/63 tests passed, zero skips**. Coordinator also confirmed the 15-file package dry-run (dashboard assets and observability reference included; runtime logs excluded) and a clean `git diff --check`.
+
+Coverage includes bounded metadata logging, transport/runtime instrumentation, read-only dashboard HTTP/security, actual UI code against hostile-text DOM fixtures, actual bound-port persistence before readiness, passive saved-URL discovery, bind/persistence failures and shutdown races. These use mocked Pi hosts and test-only loopback services; no live Pi dashboard startup or URL-liveness guarantee is claimed.
+
+A separate synthetic-browser smoke check verified desktop rendering, literal hostile labels, unknown/stale evidence, error filtering and expandable metadata. Browser native-click automation timed out; programmatic DOM clicks verified the interactions instead, so this is not a full keyboard/mouse accessibility or live Pi end-to-end test.
 
 Tests use temporary directories, local test-only HTTP servers, static session fixtures and mocked Pi hosts/launch executors. They never start agents, tabs, terminals, contact models, services or bridges, or access credentials.
 

@@ -5,4 +5,5 @@ dist/
 .pi/
 .pi-intercom/*.tmp
 .pi-intercom/config.lock
+.pi-intercom/logs/
 # Shared .pi-intercom/config.json is intentionally tracked.
