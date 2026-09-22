@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
+import { ConfigStore } from '../dist/config.js';
 import { listen } from '../dist/transport.js';
 
 async function waitFor(predicate, label) {
@@ -15,6 +16,9 @@ async function waitFor(predicate, label) {
 }
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-http-'));
+  // Stop production upward discovery inside this fixture, never at a real ancestor project.
+  // Coordinator startup replaces this test-only saved port with its actual bound endpoint.
+  await new ConfigStore(root).initialize('coordinator', 12345);
   const runtimes = [], extraEndpoints = [];
   t.after(async () => {
     for (const runtime of runtimes) await runtime.close();

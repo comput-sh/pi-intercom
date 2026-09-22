@@ -59,7 +59,9 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       cwd: ctx.cwd,
       sessionId: () => context!.sessionManager.getSessionId(),
       busy: () => !context!.isIdle(),
-      deliver: (content, busy) => pi.sendUserMessage(content, busy ? { deliverAs: 'steer' } : undefined),
+      // Always supply the supported busy mode: the arrival snapshot can become
+      // stale before Pi checks it. Pi still starts a normal turn when idle.
+      deliver: content => pi.sendUserMessage(content, { deliverAs: 'steer' }),
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
       notify: text => ctx.ui.notify(text, 'info'),
     }, { launch: launcher.launch, store: root => new PiConfigStore(root) });

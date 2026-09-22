@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
 import { mkdtemp, rm, access, writeFile, readFile } from 'node:fs/promises';
 import { Server } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore } from '../dist/config.js';
@@ -12,6 +13,15 @@ import { readDashboardSnapshot } from '../dist/dashboard.js';
 // These exercise the real Windows-only adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-adapter-'));
+  // Isolate this fixture from real ancestor Intercom projects. Production discovery
+  // policy is tested separately; adapter startup must never contact an ancestor host.
+  const originalDiscover = ConfigStore.discover;
+  ConfigStore.discover = async cwd => {
+    assert.equal(path.resolve(cwd), path.resolve(root), 'adapter discovery must stay in its test root');
+    const store = new ConfigStore(root);
+    try { await store.read(); return store; }
+    catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+  };
   const inheritedHerdr = process.env.HERDR_ENV;
   delete process.env.HERDR_ENV;
   const tools = new Map(), events = new Map(), messages = [], notices = [], names = [];
@@ -26,12 +36,16 @@ async function adapter(t) {
   const ctx = { cwd: root, mode: 'tui', isProjectTrusted: () => true, isIdle: () => idle,
     sessionManager: { getSessionId: () => id }, ui: { notify: (text, level) => notices.push({ text, level }) } };
   t.after(async () => {
-    await events.get('session_shutdown')();
-    if (inheritedHerdr === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = inheritedHerdr;
-    await rm(root, { recursive: true, force: true });
+    try { await events.get('session_shutdown')(); }
+    finally {
+      ConfigStore.discover = originalDiscover;
+      if (inheritedHerdr === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = inheritedHerdr;
+      await rm(root, { recursive: true, force: true });
+    }
   });
   return { root, ctx, tools, events, messages, notices, names,
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
+    setDelivery: deliver => { pi.sendUserMessage = deliver; },
     start: () => events.get('session_start')({}, ctx),
     prompt: () => events.get('before_agent_start')({ systemPrompt: 'Original system prompt' }, ctx),
     invoke: (operation, args = {}) => tools.get(`intercom_${operation}`).execute('test', args, undefined, undefined, ctx) };
@@ -74,7 +88,7 @@ test('adapter startup is passive, adds responsibility, routes idle/steering and 
   assert.match(prompt.systemPrompt, /Responsibility is not a work assignment/);
   const store = new ConfigStore(a.root), old = (await store.read()).agents[0];
   await a.invoke('send', { to: 'Coordinator', message: 'Idle message' });
-  assert.equal(a.messages.at(-1).options, undefined);
+  assert.deepEqual(a.messages.at(-1).options, { deliverAs: 'steer' });
   a.setIdle(false);
   await a.invoke('send', { to: 'Coordinator', message: 'Busy message' });
   assert.deepEqual(a.messages.at(-1).options, { deliverAs: 'steer' });
@@ -88,6 +102,42 @@ test('adapter startup is passive, adds responsibility, routes idle/steering and 
   await a.events.get('session_shutdown')();
   await assert.rejects(a.invoke('list'), /not initialized/);
   assert.equal(await a.prompt(), undefined);
+});
+
+test('adapter always supplies steering: installed host keeps idle normal and handles idle-snapshot to busy-acceptance race', windowsOnly, async t => {
+  // Source-backed mocked compatibility probe, not a live Pi session. Deliberately
+  // fail if the pinned host changes this branch rather than testing stale copied behavior.
+  const hostSource = await readFile(fileURLToPath(new URL('./core/agent-session.js', import.meta.resolve('@earendil-works/pi-coding-agent'))), 'utf8');
+  assert.match(hostSource, /streamingBehavior: options\?\.deliverAs/);
+  const start = hostSource.indexOf('// If streaming, queue via steer()');
+  const end = hostSource.indexOf('// Flush any pending bash', start);
+  assert.ok(start >= 0 && end > start, 'installed prompt streaming branch must remain identifiable');
+  const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+  const accept = new AsyncFunction('options', 'expandedText', 'currentImages',
+    `const preflightResult = undefined; ${hostSource.slice(start, end)} return 'normal idle prompt continues';`);
+  const queued = [], host = { isStreaming: true,
+    _queueSteer: async text => { queued.push(text); },
+    _queueFollowUp: async () => assert.fail('must not switch to follow-up delivery') };
+  await assert.rejects(accept.call(host, undefined, 'negative control'), /Agent is already processing/);
+  const a = await adapter(t); await a.start();
+  const submissions = [];
+  let busyAtAcceptance = false;
+  a.setDelivery((content, options) => {
+    // Pi can await input hooks after Intercom samples isIdle; another message can
+    // start processing there. Reproduce that change without launching any host.
+    submissions.push(Promise.resolve().then(() => {
+      host.isStreaming = busyAtAcceptance;
+      return accept.call(host, { streamingBehavior: options?.deliverAs }, content);
+    }).then(value => ({ value }), error => ({ error })));
+  });
+  await a.invoke('send', { to: 'Coordinator', message: 'Idle normal prompt' });
+  assert.deepEqual(await submissions[0], { value: 'normal idle prompt continues' });
+  assert.equal(queued.length, 0, 'explicit steering does not queue when host is idle');
+  // ctx.isIdle remains true: the runtime snapshot is deliberately stale.
+  busyAtAcceptance = true;
+  await a.invoke('send', { to: 'Coordinator', message: 'Race-safe incoming prompt' });
+  assert.equal((await submissions[1]).error, undefined);
+  assert.equal(queued.length, 1); assert.match(queued[0], /Race-safe incoming prompt/);
 });
 
 test('adapter anonymous configure/reload loads responsibility without a work turn; name errors remain explicit', windowsOnly, async t => {
@@ -199,7 +249,8 @@ test('adapter shutdown during pending dashboard-port persistence cannot publish 
   let starting;
   try {
     starting = a.start();
-    await pendingWrite;
+    // If startup fails before reaching persistence, fail instead of waiting forever.
+    await Promise.race([pendingWrite, starting.then(() => { throw new Error('startup ended before dashboard save'); })]);
     await a.events.get('session_shutdown')();
     release(); await starting;
   } finally {

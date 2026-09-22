@@ -4,6 +4,7 @@ import { mkdtemp, readdir, readFile, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { Intercom } from '../dist/runtime.js';
+import { ConfigStore } from '../dist/config.js';
 import { LocalObserver, LOG_DIRECTORY, LOG_FILE_PATTERN, LOG_LIMITS } from '../dist/observability.js';
 import { readDashboardSnapshot } from '../dist/dashboard.js';
 
@@ -11,6 +12,8 @@ const BODY = 'PRIVATE_TASK_BODY_MUST_NOT_BE_LOGGED';
 const CREDENTIAL = 'PRIVATE_ERROR_CREDENTIAL_MUST_NOT_BE_LOGGED';
 async function fixture(t, createObserver = (root, id) => new LocalObserver(root, id)) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-observation-'));
+  // Isolate discovery from real ancestor projects; startup replaces this saved test port.
+  await new ConfigStore(root).initialize('coordinator', 12345);
   const runtimes = [], observers = [];
   t.after(async () => {
     for (const runtime of runtimes) await runtime.close();

@@ -8,6 +8,9 @@ import { ConfigStore } from '../dist/config.js';
 
 async function setup(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-integration-'));
+  // Keep runtime discovery in this fixture instead of adopting a real ancestor config.
+  // The fake listener's actual port replaces this test-only saved endpoint at startup.
+  await new ConfigStore(root).initialize('c', 12345);
   let nextPort = 30000;
   const endpoints = new Map(), all = [], wire = [], launches = [];
   const options = {
@@ -88,8 +91,12 @@ test('idle/steering messages and independent status reports share reporting with
   assert.equal(w.messages.at(-1).busy, true);
   const before = w.messages.length;
   await c.runtime.tool('request_status', { to: 'Builder' });
-  await new Promise(resolve => setImmediate(resolve));
-  await new Promise(resolve => setTimeout(resolve, 20));
+  const deadline = Date.now() + 3000;
+  while (!c.messages.at(-1)?.text.includes('Intercom status')) {
+    if (Date.now() >= deadline) assert.fail(`Timed out observing status report; last coordinator message: ${c.messages.at(-1)?.text}; worker notices: ${w.notices.join('; ')}`);
+    // Observe asynchronous receipt only; never resend the request or initiate recovery.
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.equal(w.messages.length, before);
   assert.match(c.messages.at(-1).text, /"busy":true/);
   assert.ok(wire.some(x => x.message.kind === 'request_status'));

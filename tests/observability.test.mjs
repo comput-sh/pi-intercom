@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile, utimes, truncat
 import { LocalObserver, sanitizeObservation, observationError, LOG_DIRECTORY, LOG_FILE_PATTERN, LOG_LIMITS } from '../dist/observability.js';
 import { envelope } from '../dist/transport.js';
 import { Intercom } from '../dist/runtime.js';
+import { ConfigStore } from '../dist/config.js';
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-observation-'));
@@ -102,6 +103,8 @@ test('coordinator maintenance prunes only closed writers by age/quota, never act
 });
 test('runtime shutdown closes transport first, bounds a hung observer, and shares repeated close', async t => {
   const root = await fixture(t);
+  // Even with a mocked listener, startup must never discover/report to an ancestor host.
+  await new ConfigStore(root).initialize('coordinator', 12345);
   let endpointClosed = false, observerCloses = 0;
   const runtime = new Intercom({ cwd: root, sessionId: () => 'coordinator', busy: () => false,
     deliver: () => {}, setName: async () => {}, notify: () => {} }, {
