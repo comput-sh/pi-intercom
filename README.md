@@ -134,7 +134,7 @@ Production source runs through Pi's TypeScript loader; `npm run build` generates
 
 ## Publishing
 
-[`.github/workflows/publish.yml`](https://github.com/comput-sh/pi-intercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. After the repository migration, configure the npm trusted publisher as owner `comput-sh`, repository `pi-intercom`, workflow `publish.yml`, with no environment. The owner confirmed updating this npm mapping after migration. The GitHub transfer alone does not configure it; successful publishing must be verified through the release workflow. Historical release and workflow links below retain the original owner as provenance.
+[`.github/workflows/publish.yml`](https://github.com/comput-sh/pi-intercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. Configure the npm trusted publisher as owner `comput-sh`, repository `pi-intercom`, workflow `publish.yml`, with no environment.
 
 The workflow validates on Windows, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
@@ -142,10 +142,10 @@ Published versions are immutable. For a new release, bump package and lockfile v
 
 ### Release evidence
 
-- [v0.1.1](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.1): successful npm OIDC [run 35466923379](https://github.com/mbundgaard/PiIntercom/actions/runs/35466923379).
-- [v0.1.2](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.2): successful npm OIDC [run 35467586052](https://github.com/mbundgaard/PiIntercom/actions/runs/35467586052). Fixes Windows Herdr launching by using `herdr pane run` on the returned pane ID with encoded PowerShell invoking `pi.ps1`, instead of the failing `Start-Process pi` wrapper. No Herdr agent alias is needed.
+- [v0.1.1](https://github.com/comput-sh/pi-intercom/releases/tag/v0.1.1): successful npm OIDC [run 35466923379](https://github.com/comput-sh/pi-intercom/actions/runs/35466923379).
+- [v0.1.2](https://github.com/comput-sh/pi-intercom/releases/tag/v0.1.2): successful npm OIDC [run 35467586052](https://github.com/comput-sh/pi-intercom/actions/runs/35467586052). Fixes Windows Herdr launching by using `herdr pane run` on the returned pane ID with encoded PowerShell invoking `pi.ps1`, instead of the failing `Start-Process pi` wrapper. No Herdr agent alias is needed.
 
-- [v0.1.3](https://github.com/mbundgaard/PiIntercom/releases/tag/v0.1.3): successful npm OIDC [run 35474304380](https://github.com/mbundgaard/PiIntercom/actions/runs/35474304380). Contains the fixes below, not the observability feature added in 0.2.0.
+- [v0.1.3](https://github.com/comput-sh/pi-intercom/releases/tag/v0.1.3): successful npm OIDC [run 35474304380](https://github.com/comput-sh/pi-intercom/actions/runs/35474304380). Contains the fixes below, not the observability feature added in 0.2.0.
 
 ### 0.1.3 changes and verification
 
