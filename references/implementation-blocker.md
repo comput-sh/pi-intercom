@@ -1,6 +1,6 @@
 # V1 cancellation capability blocked: Pi cancellation contract
 
-> **Current status:** The user subsequently approved implementing independent features. The supported core now exists; see the [historical implementation snapshot](https://github.com/mbundgaard/PiIntercom/blob/main/references/implementation-progress.md) and [current README](../README.md). Stop/close remain disabled, failing before cancellation/shutdown; README also records the separate manual-compaction input-acceptance gap. The historical feasibility report below is preserved as evidence; its statements that no implementation exists describe the earlier run, not current project status.
+> **Current status:** The user subsequently approved implementing independent features. The supported core now exists; see the [historical implementation snapshot](https://github.com/comput-sh/pi-intercom/blob/main/references/implementation-progress.md) and [current README](../README.md). Stop/close remain disabled, failing before cancellation/shutdown; README also records the separate manual-compaction input-acceptance gap. The historical feasibility report below is preserved as evidence; its statements that no implementation exists describe the earlier run, not current project status.
 
 ## Historical outcome
 

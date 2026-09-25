@@ -119,7 +119,7 @@ See [observability reference](references/observability.md) for privacy, rotation
 
 ## Development and validation
 
-Run these commands from a source checkout; tests and workflows are not shipped in the npm package. The [original implementation validation snapshot](https://github.com/mbundgaard/PiIntercom/blob/main/references/implementation-progress.md) is historical, not the current live-test inventory.
+Run these commands from a source checkout; tests and workflows are not shipped in the npm package. The [original implementation validation snapshot](https://github.com/comput-sh/pi-intercom/blob/main/references/implementation-progress.md) is historical, not the current live-test inventory.
 
 ```sh
 npm ci
@@ -134,7 +134,7 @@ Production source runs through Pi's TypeScript loader; `npm run build` generates
 
 ## Publishing
 
-[`.github/workflows/publish.yml`](https://github.com/mbundgaard/PiIntercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. Configure the npm trusted publisher as owner `mbundgaard`, repository `PiIntercom`, workflow `publish.yml`, with no environment.
+[`.github/workflows/publish.yml`](https://github.com/comput-sh/pi-intercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. After the repository migration, configure the npm trusted publisher as owner `comput-sh`, repository `pi-intercom`, workflow `publish.yml`, with no environment. The owner confirmed updating this npm mapping after migration. The GitHub transfer alone does not configure it; successful publishing must be verified through the release workflow. Historical release and workflow links below retain the original owner as provenance.
 
 The workflow validates on Windows, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 

@@ -6,13 +6,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mbundgaard/PiIntercom.git"
+    "url": "git+https://github.com/comput-sh/pi-intercom.git"
   },
-  "homepage": "https://github.com/mbundgaard/PiIntercom#readme",
+  "homepage": "https://github.com/comput-sh/pi-intercom#readme",
   "bugs": {
-    "url": "https://github.com/mbundgaard/PiIntercom/issues"
+    "url": "https://github.com/comput-sh/pi-intercom/issues"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Explicit local communication between Pi sessions; Pi orchestrates.",
   "type": "module",
   "keywords": [
