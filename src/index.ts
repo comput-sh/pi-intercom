@@ -20,7 +20,7 @@ const tools: [string, string, TSchema][] = [
   ['close_worker', UNSUPPORTED_CANCELLATION, to],
   ['resume_worker', 'Coordinator only. Launch saved session by ID in configured directory. No replacement/removal on failure; no old assignment is automatically started.', to],
   ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Stop/close are disabled on current host: arrange explicit user closure first.', to],
-  ['set_multiplexer', 'Coordinator only. Set herdr (default) or none (separate visible Windows terminals) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
+  ['set_multiplexer', 'Coordinator only. Set herdr (default, Windows/Linux) or none (separate visible Windows terminals; unsupported on Linux) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
 
 // Launchers pass no --session-dir. Match child Pi's env > per-cwd settings >
@@ -53,7 +53,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     const started = ++generation;
     await dashboard?.close(); dashboard = undefined;
     await runtime?.close(); context = ctx;
-    if (process.platform !== 'win32' || ctx.mode !== 'tui') throw new Error('PiIntercom V1 requires Windows interactive Pi. No resources started.');
+    if (!['win32', 'linux'].includes(process.platform) || ctx.mode !== 'tui') throw new Error('PiIntercom requires Windows or Linux interactive Pi. No resources started.');
     if (!ctx.isProjectTrusted()) throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
     runtime = new Intercom({
       cwd: ctx.cwd,

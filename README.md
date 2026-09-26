@@ -1,12 +1,12 @@
 # PiIntercom (V1 supported core)
 
-One Windows interactive Pi extension for coordinator and workers. **Intercom communicates; Pi orchestrates.** No automatic assignment, retry, removal, replacement, launcher fallback, commit, or rollback.
+One Windows/Linux interactive Pi extension for coordinator and workers. **Intercom communicates; Pi orchestrates.** No automatic assignment, retry, removal, replacement, launcher fallback, commit, or rollback.
 
 **`intercom_stop_worker` and `intercom_close_worker` are disabled.** They throw an unsupported-host error before sending control or calling cancellation/shutdown. Incoming stop/close controls also fail. Pi 0.84.4 leaves retry continuation alive after extension abort. See [blocker](references/implementation-blocker.md). Newer versions are not automatically assumed safe; a verified supported lifecycle API and tests are required before enabling these capabilities.
 
 ## Use
 
-Requires Windows, Node 22+, interactive Pi with project trust, and this package's peer dependencies supplied by Pi (`@earendil-works/pi-coding-agent`, `typebox`). Launch the coordinator explicitly from the intended root:
+Requires Windows or Linux, Node 22+, interactive Pi with project trust, and this package's peer dependencies supplied by Pi (`@earendil-works/pi-coding-agent`, `typebox`). Launch the coordinator explicitly from the intended root:
 
 ```powershell
 cd D:\Source\YourProject
@@ -29,11 +29,21 @@ Then start a new Pi session or run Pi `/reload`. `pi install` records the packag
 
 The 0.1.2 update/reload and subsequent worker creation were observed live; comprehensive reload/session-replacement lifecycle coverage remains pending.
 
+### Linux source installation
+
+```sh
+pi install /absolute/path/to/pi-intercom
+```
+
+Run Pi `/reload` (or start a new interactive session) after installing or changing source. Linux supports messaging, configuration, the dashboard, and Herdr worker launch/resume. Launch the coordinator inside a Herdr workspace; `herdr`, `sh`, and `pi` must be on PATH in worker panes. Workers run a quoted POSIX shell command in the returned pane, with the coordinator's actual extension path. Project trust remains required.
+
+Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headless fallback, or automatic cleanup. Stop/close remain disabled on both platforms. Automated Linux tests cover shell argument preservation and adapter/HTTP behavior. A live source-loaded Linux Herdr smoke test launched two workers: both registered, loaded their configured names/responsibilities, and acknowledged coordinator messages through Intercom. This verifies launch and round-trip messaging, not resume or cancellation.
+
 ### Startup and launchers
 
 Without shared config, the current working directory becomes the coordinator root. Startup creates `.pi-intercom/config.json`, opens a loopback listener, synchronizes the name `Coordinator`, and waits for user input (no model turn). Existing config is found by walking upward. Invalid/unreadable config is an error and is not overwritten. Unknown session IDs, including forks, are workers, never replacement coordinators.
 
-Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH and `powershell.exe` plus `pi.ps1` available in the worker pane. Each worker gets **one tab, one pane, no split, no focus change**. The `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
+Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
 
 ## Explicit workflow
 
@@ -140,6 +150,13 @@ The workflow validates on Windows, then publishes with provenance from a GitHub-
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
+### 0.3.0 Linux support
+
+- Interactive startup, messaging and dashboard support on Linux.
+- Herdr worker launch/resume command generation uses quoted POSIX shell arguments; Windows behavior is retained. Linux `none` fails explicitly without fallback.
+- Linux validation: typecheck and 67/67 tests passed, with no skips. Live source-loaded Herdr launch, registration, configure/reload and round-trip messaging passed with two workers.
+- CI and release validation now run on Windows and Linux. Stop/close remain disabled; live Linux resume is not yet verified.
+
 ### Release evidence
 
 - [v0.1.1](https://github.com/comput-sh/pi-intercom/releases/tag/v0.1.1): successful npm OIDC [run 35466923379](https://github.com/comput-sh/pi-intercom/actions/runs/35466923379).
@@ -187,4 +204,4 @@ The release/session evidence reported during the 0.1.2 validation establishes th
 - Actual persisted-session lookup and resumed worker startup; never-used session failure.
 - Cross-process/network-drive atomicity and Windows ACL/sharing failures (same-process temp-filesystem races are tested).
 - Stop/close remain disabled on all hosts until a verified cancellation API covers retries, compaction continuations and queues. No workaround or weakened guarantee.
-- Explicit repeat-registration tool and broad anonymous permissions require a contract decision. Duplicate-session locks, takeover, durable logging and non-Windows support are deferred.
+- Explicit repeat-registration tool and broad anonymous permissions require a contract decision. Duplicate-session locks, takeover, durable logging, non-Herdr Linux launchers and macOS support are deferred.

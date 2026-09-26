@@ -10,7 +10,7 @@ import { ConfigStore } from '../dist/config.js';
 import { listen, send } from '../dist/transport.js';
 import { readDashboardSnapshot } from '../dist/dashboard.js';
 
-// These exercise the real Windows-only adapter, but never construct a Pi host or launch a process.
+// These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-adapter-'));
   // Isolate this fixture from real ancestor Intercom projects. Production discovery
@@ -50,7 +50,7 @@ async function adapter(t) {
     prompt: () => events.get('before_agent_start')({ systemPrompt: 'Original system prompt' }, ctx),
     invoke: (operation, args = {}) => tools.get(`intercom_${operation}`).execute('test', args, undefined, undefined, ctx) };
 }
-const windowsOnly = { skip: process.platform !== 'win32' ? 'Windows-only extension startup adapter' : false };
+const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? 'Windows/Linux extension startup adapter' : false };
 
 test('single extension registers all agreed tools without starting resources in factory', async () => {
   const tools = new Map(), events = new Map();
@@ -66,7 +66,7 @@ test('single extension registers all agreed tools without starting resources in 
   await events.get('session_shutdown')();
 });
 
-test('adapter rejects untrusted/noninteractive startup before creating config', windowsOnly, async t => {
+test('adapter rejects untrusted/noninteractive startup before creating config', supportedHost, async t => {
   const a = await adapter(t);
   a.ctx.isProjectTrusted = () => false;
   await assert.rejects(a.start(), /trust/);
@@ -78,7 +78,7 @@ test('adapter rejects untrusted/noninteractive startup before creating config', 
   assert.equal(a.messages.length, 0);
 });
 
-test('adapter startup is passive, adds responsibility, routes idle/steering and replaces session listener', windowsOnly, async t => {
+test('adapter startup is passive, adds responsibility, routes idle/steering and replaces session listener', supportedHost, async t => {
   const a = await adapter(t); await a.start();
   assert.equal(a.messages.length, 0);
   assert.deepEqual(a.names, ['Coordinator']);
@@ -104,7 +104,7 @@ test('adapter startup is passive, adds responsibility, routes idle/steering and 
   assert.equal(await a.prompt(), undefined);
 });
 
-test('adapter always supplies steering: installed host keeps idle normal and handles idle-snapshot to busy-acceptance race', windowsOnly, async t => {
+test('adapter always supplies steering: installed host keeps idle normal and handles idle-snapshot to busy-acceptance race', supportedHost, async t => {
   // Source-backed mocked compatibility probe, not a live Pi session. Deliberately
   // fail if the pinned host changes this branch rather than testing stale copied behavior.
   const hostSource = await readFile(fileURLToPath(new URL('./core/agent-session.js', import.meta.resolve('@earendil-works/pi-coding-agent'))), 'utf8');
@@ -140,7 +140,7 @@ test('adapter always supplies steering: installed host keeps idle normal and han
   assert.equal(queued.length, 1); assert.match(queued[0], /Race-safe incoming prompt/);
 });
 
-test('adapter anonymous configure/reload loads responsibility without a work turn; name errors remain explicit', windowsOnly, async t => {
+test('adapter anonymous configure/reload loads responsibility without a work turn; name errors remain explicit', supportedHost, async t => {
   const a = await adapter(t), registrations = [];
   const coordinator = await listen(undefined, async message => { registrations.push(message); });
   t.after(() => coordinator.close());
@@ -166,7 +166,7 @@ test('adapter anonymous configure/reload loads responsibility without a work tur
   assert.match(a.messages[0].content, /Explicit review task/);
 });
 
-test('adapter activity hooks record snapshots only and coordinator dashboard shuts down with session', windowsOnly, async t => {
+test('adapter activity hooks record snapshots only and coordinator dashboard shuts down with session', supportedHost, async t => {
   const a = await adapter(t); await a.start();
   const notice = a.notices.find(item => item.text.includes('read-only dashboard:'));
   assert.ok(notice);
@@ -189,7 +189,7 @@ test('adapter activity hooks record snapshots only and coordinator dashboard shu
   assert.doesNotMatch(JSON.stringify(snapshot.events), /PRIVATE_EVENT_BODY|task\.completed/);
 });
 
-test('adapter failed dashboard-port persistence closes dashboard without false readiness or lost communication', windowsOnly, async t => {
+test('adapter failed dashboard-port persistence closes dashboard without false readiness or lost communication', supportedHost, async t => {
   const a = await adapter(t), bound = [];
   const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
   ConfigStore.prototype.update = function(id, mutate, guard) {
@@ -215,7 +215,7 @@ test('adapter failed dashboard-port persistence closes dashboard without false r
   assert.equal(a.messages.length, 1);
 });
 
-test('adapter dashboard bind failure preserves legacy config and communication without claiming a URL', windowsOnly, async t => {
+test('adapter dashboard bind failure preserves legacy config and communication without claiming a URL', supportedHost, async t => {
   const a = await adapter(t), originalListen = Server.prototype.listen;
   let listens = 0;
   Server.prototype.listen = function(...args) {
@@ -230,7 +230,7 @@ test('adapter dashboard bind failure preserves legacy config and communication w
   assert.equal(a.messages.length, 1);
 });
 
-test('adapter shutdown during pending dashboard-port persistence cannot publish readiness or leave dashboard listening', windowsOnly, async t => {
+test('adapter shutdown during pending dashboard-port persistence cannot publish readiness or leave dashboard listening', supportedHost, async t => {
   const a = await adapter(t), bound = [];
   const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
   let entered, release;
@@ -266,7 +266,7 @@ test('adapter shutdown during pending dashboard-port persistence cannot publish 
   await assert.rejects(a.invoke('list'), /not initialized/);
 });
 
-test('adapter name-sync startup failure retains endpoint, malformed config startup reports failure', windowsOnly, async t => {
+test('adapter name-sync startup failure retains endpoint, malformed config startup reports failure', supportedHost, async t => {
   const a = await adapter(t); a.failName(true); await a.start();
   assert.ok(a.notices.some(n => /Name\/responsibility synchronization failed/.test(n.text)));
   assert.equal(a.messages.length, 0);

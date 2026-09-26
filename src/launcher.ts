@@ -9,6 +9,7 @@ export const run: Run = async (file, args) => {
   return stdout;
 };
 export const psQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+export const shQuote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
 export const encoded = (script: string) => Buffer.from(script, 'utf16le').toString('base64');
 export interface LauncherOptions {
   extension: string;
@@ -20,7 +21,9 @@ export interface LauncherOptions {
 export function launchers(options: LauncherOptions) {
   const exec = options.run ?? run, env = options.env ?? process.env;
   async function launch(request: LaunchRequest): Promise<unknown> {
-    if ((options.platform ?? process.platform) !== 'win32') fail('V1 launchers support Windows only');
+    const platform = options.platform ?? process.platform;
+    if (platform !== 'win32' && platform !== 'linux') fail('launchers support Windows and Linux only');
+    if (platform === 'linux' && request.multiplexer === 'none') fail('Linux worker launching requires Herdr; none is Windows-only. No terminal fallback');
     if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
     const args = ['-e', options.extension, ...(request.sessionId ? ['--session', request.sessionId] : [])];
     if (request.multiplexer === 'herdr') {
@@ -35,7 +38,9 @@ export function launchers(options: LauncherOptions) {
       // Run an explicit PowerShell command in the returned shell pane instead.
       // This acknowledges command submission only, not Pi readiness/registration.
       const script = `$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
-      const command = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded(script)}`;
+      const command = platform === 'win32'
+        ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded(script)}`
+        : `sh -c ${shQuote(`cd ${shQuote(request.cwd)} && exec pi ${args.map(shQuote).join(' ')}`)}`;
       try { await exec('herdr', ['pane', 'run', pane, command]); }
       catch (e) { fail(`Herdr Pi command submission failed in tab ${tab}, pane ${pane}: ${String(e)}. Tab/process may remain; no automatic cleanup/retry/replacement`); }
       return { commandSubmitted: true, tab, pane, piReadiness: 'not observed; inspect pane for startup failures', registrationAwaited: false };
