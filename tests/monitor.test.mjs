@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { createMonitor, parseMonitorRoot } from '../dist/monitor.js';
 import { renderMonitor } from '../dist/monitor-view.js';
@@ -29,8 +30,10 @@ function harness(read) {
 }
 
 test('root parser requires exactly one absolute root; import has no terminal startup', () => {
-  assert.equal(parseMonitorRoot(['--root', '/project']), '/project');
-  for (const args of [[], ['--root'], ['--root', 'relative'], ['--other', '/project'], ['--root', '/project', 'extra']]) {
+  const root = path.resolve('project');
+  assert.equal(parseMonitorRoot(['--root', root]), root);
+  assert.equal(parseMonitorRoot(['--root', '/project']), path.normalize('/project'));
+  for (const args of [[], ['--root'], ['--root', 'relative'], ['--other', root], ['--root', root, 'extra']]) {
     assert.throws(() => parseMonitorRoot(args), /Usage:/);
   }
 });

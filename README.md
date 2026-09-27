@@ -22,7 +22,7 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 
 **Intercom communicates; Pi orchestrates.** It is a local coordination layer, not an autonomous scheduler or a task-completion guarantee.
 
-> **0.4.0:** The terminal monitor replaces the browser dashboard. Public worker reports and the read-only JSON worker-status tool keep coordinator decisions separate from observed activity.
+> **0.4.1:** The terminal monitor replaces the browser dashboard. Public worker reports and the read-only JSON worker-status tool keep coordinator decisions separate from observed activity.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
 
@@ -154,7 +154,7 @@ Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore
 }
 ```
 
-Legacy coordinator-only `dashboardPort` values are accepted for migration, but the browser dashboard has been retired in 0.4.0. Coordinator startup removes this field through the guarded config-write path. `intercom_list` returns the saved roster without `dashboardPort` or `dashboardUrl`; it does not probe live availability. The agent messaging `port` is unchanged.
+Legacy coordinator-only `dashboardPort` values are accepted for migration, but the browser dashboard has been retired in 0.4.1. Coordinator startup removes this field through the guarded config-write path. `intercom_list` returns the saved roster without `dashboardPort` or `dashboardUrl`; it does not probe live availability. The agent messaging `port` is unchanged.
 
 Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
@@ -184,7 +184,7 @@ Detailed phase reports require reloading participating Pi sessions. `thinking` i
 
 The pane's display name is simply `Intercom monitor`. Ownership uses saved pane/workspace/coordinator identities in machine-local `.pi-intercom/monitor-*.json` records; the generic display name alone is never proof of ownership. Older session-bearing labels are migrated when their pane is identified. Reload reuses an existing pane without injecting commands into it; pane existence is not proof the monitor is running. If the owner closes the pane, a subsequent coordinator startup can create its replacement. If the monitor program exits but its pane remains, restart it explicitly in that shell: `node /absolute/package/path/dist/monitor.js --root /absolute/project/path`. Moved/ambiguous panes and partial launches require inspection, not blind duplicate creation. A crash can leave a launch lock/pending record: inspect Herdr's panes and these records before manually recovering them. No automatic pane cleanup, focus stealing, or retry is performed.
 
-Outside Herdr, messaging continues without a status pane. The browser dashboard is retired; no dashboard listener or browser assets are started/shipped in 0.4.0. A monitor or legacy-metadata cleanup failure does not disable messaging. Reload an older running coordinator to close its former dashboard listener. These features replace the browser dashboard from 0.3.0.
+Outside Herdr, messaging continues without a status pane. The browser dashboard is retired; no dashboard listener or browser assets are started/shipped in 0.4.1. A monitor or legacy-metadata cleanup failure does not disable messaging. Reload an older running coordinator to close its former dashboard listener. These features replace the browser dashboard from 0.3.0.
 
 ### JSON worker status for agents and chat integrations
 
@@ -244,7 +244,9 @@ The workflow validates on Windows and Linux, then publishes with provenance from
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
-### 0.4.0 Coordinator workspace
+### 0.4.1 Coordinator workspace
+
+The 0.4.0 GitHub release did not reach npm because a Windows-specific test expectation failed. 0.4.1 corrects that assertion without changing parser behavior; the 0.4.0 tag remains unchanged.
 
 - Standalone Herdr terminal monitor replaces the browser dashboard; automatic pane ownership/reuse, keyboard selection and worker details.
 - Explicit public worker reports: blocked, needs decision, ready for review and clear; no automatic approvals or assignments.
