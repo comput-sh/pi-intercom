@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
 import { LocalObserver, LOG_DIRECTORY, LOG_FILE_PATTERN, LOG_LIMITS } from '../dist/observability.js';
-import { readDashboardSnapshot } from '../dist/dashboard.js';
+import { readObservationSnapshot } from '../dist/snapshot.js';
 
 const BODY = 'PRIVATE_TASK_BODY_MUST_NOT_BE_LOGGED';
 const CREDENTIAL = 'PRIVATE_ERROR_CREDENTIAL_MUST_NOT_BE_LOGGED';
@@ -71,7 +71,7 @@ test('real runtime telemetry correlates HTTP receipt/submission without persisti
   assert.ok(log.events.some(event => event.event === 'host.submission' && event.outcome === 'failed' && event.errorCode === 'operation_failed'));
   assert.ok(log.events.some(event => event.event === 'status.received' && event.peerSessionId === 'removed-worker'));
   assert.doesNotMatch(log.text, /task\.completed|model\.completed|queue\.accepted/);
-  const snapshot = await readDashboardSnapshot(f.root);
+  const snapshot = await readObservationSnapshot(f.root);
   assert.ok(snapshot.events.some(event => event.correlationId === receipt.correlationId));
   assert.equal(snapshot.config.agents.some(agent => agent.sessionId === 'removed-worker'), false);
 });
@@ -113,7 +113,7 @@ test('blocked observer has bounded queue and cannot delay communication or excee
   assert.ok(log.events.length <= 10, 'two writers each retain at most in-flight plus four queued records');
 });
 
-test('rotated logs stay bounded, remain metadata-only, and dashboard reads preserve the newest evidence', async t => {
+test('rotated logs stay bounded, remain metadata-only, and snapshot reads preserve the newest evidence', async t => {
   const f = await fixture(t);
   const observer = new LocalObserver(f.root, 'rotation-writer', { fileBytes: LOG_LIMITS.entryBytes });
   f.observers.push(observer);
@@ -123,7 +123,7 @@ test('rotated logs stay bounded, remain metadata-only, and dashboard reads prese
   assert.ok(log.files.length <= 3); assert.ok(log.files.length >= 2, 'fixture actually rotates');
   for (const file of log.files) assert.ok((await stat(path.join(f.root, LOG_DIRECTORY, file))).size <= LOG_LIMITS.entryBytes);
   assert.doesNotMatch(log.text, new RegExp(`${BODY}|${CREDENTIAL}`));
-  const before = log.text, snapshot = await readDashboardSnapshot(f.root);
+  const before = log.text, snapshot = await readObservationSnapshot(f.root);
   assert.ok(snapshot.events.some(event => event.correlationId === 'sample-199'));
-  assert.equal((await records(f.root)).text, before, 'dashboard reads cannot prune/rotate logs');
+  assert.equal((await records(f.root)).text, before, 'snapshot reads cannot prune/rotate logs');
 });

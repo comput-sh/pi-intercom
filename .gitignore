@@ -6,4 +6,8 @@ dist/
 .pi-intercom/*.tmp
 .pi-intercom/config.lock
 .pi-intercom/logs/
+.pi-intercom/reports/
+# Local monitor pane ownership and uncertain-launch fences (not agent config)
+.pi-intercom/monitor-*.json
+.pi-intercom/monitor-*.json.lock
 # Shared .pi-intercom/config.json is intentionally tracked.

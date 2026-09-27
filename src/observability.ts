@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { ActivityPhase, ActivityDetail } from './activity.js';
 import { randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, opendir, rename, stat, unlink } from 'node:fs/promises';
 
@@ -9,7 +10,7 @@ export const EVENT_TYPES = ['runtime.starting', 'runtime.ready', 'runtime.closed
 export type EventType = typeof EVENT_TYPES[number];
 const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready'] as const;
 const ERROR_CODES = ['operation_failed', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EADDRINUSE', 'EACCES', 'EPERM', 'ENOENT', 'ENOSPC'] as const;
-const KINDS = ['message', 'registration', 'status', 'request_status', 'reload', 'stop', 'close'] as const;
+const KINDS = ['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close'] as const;
 const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize'] as const;
 export interface EventMetadata {
   peerSessionId?: string;
@@ -17,6 +18,8 @@ export interface EventMetadata {
   correlationId?: string;
   kind?: typeof KINDS[number];
   busy?: boolean;
+  phase?: ActivityPhase;
+  detail?: ActivityDetail;
   port?: number;
   role?: 'coordinator' | 'worker' | 'anonymous';
   outcome?: typeof OUTCOMES[number];
@@ -49,6 +52,8 @@ export function sanitizeObservation(value: unknown): Observation | undefined {
   if (safeText(v.correlationId, 128) && /^[a-zA-Z0-9-]+$/.test(v.correlationId)) result.correlationId = v.correlationId;
   if (includes(KINDS, v.kind)) result.kind = v.kind;
   if (typeof v.busy === 'boolean') result.busy = v.busy;
+  if (includes(['working', 'thinking', 'responding', 'tool', 'idle'], v.phase)) result.phase = v.phase;
+  if (includes(['processing', 'thinking', 'responding', 'reading_files', 'editing_files', 'running_command', 'using_tool', 'multiple_tools', 'settled'], v.detail)) result.detail = v.detail;
   if (Number.isInteger(v.port) && Number(v.port) >= 1 && Number(v.port) <= 65535) result.port = Number(v.port);
   if (includes(['coordinator', 'worker', 'anonymous'], v.role)) result.role = v.role;
   if (includes(OUTCOMES, v.outcome)) result.outcome = v.outcome;

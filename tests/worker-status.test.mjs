@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { workerObservation, workerStatusPage } from '../dist/worker-status.js';
+const now = Date.parse('2026-01-01T00:01:00Z');
+const stamp = ms => new Date(now - ms).toISOString();
+const worker = i => ({sessionId:`w${i}`,name:`Worker-${i}`,coordinator:false});
+const snapshot = (events = []) => ({version:1,generatedAt:stamp(0),staleAfterMs:60000,config:{agents:[{sessionId:'c',coordinator:true},worker(0)]},events,reports:[],errors:[],truncated:false});
+const event = (overrides={}) => ({sessionId:'w0',event:'host.activity',timestamp:stamp(1000),writerId:'writer',busy:true,phase:'thinking',detail:'thinking',...overrides});
+test('status JSON preserves unknown, future, stale, conflict and closed evidence', () => {
+  assert.equal(workerObservation(snapshot(), 'w0', now).stale,null);
+  assert.equal(workerObservation(snapshot([event()]), 'w0', now).observedStatus,'thinking');
+  const old=workerObservation(snapshot([event({timestamp:stamp(61000)})]),'w0',now);
+  assert.equal(old.stale,true); assert.equal(old.observationAgeSeconds,61);
+  assert.equal(workerObservation(snapshot([event({timestamp:stamp(-1000)})]),'w0',now).evidence,'clock_uncertain');
+  assert.equal(workerObservation(snapshot([event(),event({busy:false})]),'w0',now).evidence,'conflicting');
+  assert.equal(workerObservation(snapshot([event({event:'runtime.closed'})]),'w0',now).observedStatus,'closed');
+});
+test('last activity persists across settlement; reports have their own timestamp and clear hides them', () => {
+  const s=snapshot([event({timestamp:stamp(5000),detail:'reading_files'}),event({busy:false,phase:'idle',detail:'settled'})]);
+  s.reports=[{sessionId:'w0',status:'ready_for_review',summary:'Public result',updatedAt:stamp(10000)}];
+  const data=workerStatusPage(s,{},now);
+  assert.equal(data.workers[0].observedStatus,'idle'); assert.equal(data.workers[0].lastActivity,'Reading files');
+  assert.equal(data.workers[0].report.ageSeconds,10); assert.equal(data.workers[0].report.selfReported,true);
+  s.reports[0].status='clear'; assert.equal(workerStatusPage(s,{},now).workers[0].report,null);
+});
+test('pagination and name selection return bounded, valid complete JSON', () => {
+  const s=snapshot(); s.config.agents=Array.from({length:100},(_,i)=>worker(i));
+  s.reports=s.config.agents.map(a=>({sessionId:a.sessionId,status:'blocked',summary:'界'.repeat(2000),updatedAt:stamp(0)}));
+  let offset=0,count=0;
+  do { const data=workerStatusPage(s,{offset,limit:20},now); const json=JSON.stringify(data,null,2);
+    assert.ok(Buffer.byteLength(json)<41000); assert.ok(data.workers.length>0); JSON.parse(json);
+    count+=data.workers.length; offset=data.nextOffset;
+  } while(offset!==null);
+  assert.equal(count,100);
+  assert.equal(workerStatusPage(s,{name:'worker-12'},now).workers[0].sessionId,'w12');
+  assert.throws(()=>workerStatusPage(s,{name:'missing'},now),/not found/);
+  for(const options of [{offset:-1},{limit:0},{limit:21},{offset:0.5}]) assert.throws(()=>workerStatusPage(s,options,now),/pagination/);
+  s.config=null;s.errors=['config_unavailable'];
+  assert.deepEqual(workerStatusPage(s,{},now).workers,[]);
+  assert.deepEqual(workerStatusPage(s,{},now).errors,['config_unavailable']);
+});

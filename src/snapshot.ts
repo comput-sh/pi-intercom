@@ -1,19 +1,19 @@
-import { createServer } from 'node:http';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { validateConfig, type Config } from './config.js';
+import { readWorkerReports, type WorkerReport } from './reports.js';
 import { LOG_DIRECTORY, LOG_FILE_PATTERN, sanitizeObservation, type Observation } from './observability.js';
 
 const CONFIG_BYTES = 1024 * 1024, TAIL_BYTES = 128 * 1024, TOTAL_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 32, MAX_ENTRIES = 512, MAX_EVENTS = 500, MAX_AGENTS = 256;
-export interface DashboardSnapshot {
+export interface ObservationSnapshot {
   version: 1;
   generatedAt: string;
   staleAfterMs: number;
   config: Pick<Config, 'multiplexer' | 'agents'> | null;
   events: Observation[];
+  reports?: WorkerReport[];
   truncated: boolean;
   errors: string[];
 }
@@ -53,8 +53,9 @@ async function boundedRead(file: string, limit: number, tail = false): Promise<{
   } finally { await handle.close(); }
 }
 
-export async function readDashboardSnapshot(root: string): Promise<DashboardSnapshot> {
-  const result: DashboardSnapshot = { version: 1, generatedAt: new Date().toISOString(), staleAfterMs: 60000, config: null, events: [], truncated: false, errors: [] };
+/** Bounded, sanitized local evidence, independent of any UI or HTTP server. */
+export async function readObservationSnapshot(root: string): Promise<ObservationSnapshot> {
+  const result: ObservationSnapshot = { version: 1, generatedAt: new Date().toISOString(), staleAfterMs: 60000, config: null, events: [], truncated: false, errors: [] };
   try {
     const file = await confined(root, '.pi-intercom/config.json');
     const config = validateConfig(JSON.parse((await boundedRead(file, CONFIG_BYTES)).text));
@@ -62,7 +63,6 @@ export async function readDashboardSnapshot(root: string): Promise<DashboardSnap
     result.config = { multiplexer: config.multiplexer, agents: config.agents.slice(0, MAX_AGENTS).map(a => ({
       sessionId: a.sessionId, name: a.name, coordinator: a.coordinator, description: a.description,
       projectDirectory: a.projectDirectory, port: a.port,
-      ...(a.dashboardPort === undefined ? {} : { dashboardPort: a.dashboardPort }),
     })) };
   } catch { result.errors.push('config_unavailable'); }
   try {
@@ -100,59 +100,8 @@ export async function readDashboardSnapshot(root: string): Promise<DashboardSnap
     result.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     if (result.events.length > MAX_EVENTS) { result.events = result.events.slice(-MAX_EVENTS); result.truncated = true; }
   } catch { result.errors.push('logs_unavailable'); }
+  result.reports = result.config
+    ? await readWorkerReports(root, result.config.agents.filter(agent => !agent.coordinator).map(agent => agent.sessionId))
+    : [];
   return result;
-}
-
-export interface Dashboard { url: string; port: number; close(): Promise<void> }
-export async function startDashboard(root: string, options: { assetDirectory?: string } = {}): Promise<Dashboard> {
-  const assets = options.assetDirectory ?? fileURLToPath(new URL('../dashboard/', import.meta.url));
-  const routes: Record<string, [string, string]> = {
-    '/': ['index.html', 'text/html; charset=utf-8'],
-    '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
-    '/style.css': ['style.css', 'text/css; charset=utf-8'],
-  };
-  let port = 0, active = 0, closing = false;
-  let pending: Promise<DashboardSnapshot> | undefined;
-  const server = createServer(async (request, response) => {
-    response.setHeader('Cache-Control', 'no-store');
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'");
-    response.setHeader('Referrer-Policy', 'no-referrer');
-    const end = (code: number, body: string, type = 'text/plain; charset=utf-8') => {
-      response.writeHead(code, { 'Content-Type': type }); response.end(body);
-    };
-    const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
-    if (!hosts.includes(request.headers.host ?? '') ||
-      (request.headers.origin !== undefined && !hosts.some(host => request.headers.origin === `http://${host}`)) ||
-      request.headers['sec-fetch-site'] === 'cross-site') return end(403, 'Forbidden');
-    if (request.method !== 'GET') { response.setHeader('Allow', 'GET'); return end(405, 'GET only'); }
-    if (closing || active >= 8) return end(503, 'Unavailable');
-    active++;
-    try {
-      if (request.url === '/api/snapshot') {
-        pending ??= readDashboardSnapshot(root).finally(() => { pending = undefined; });
-        return end(200, JSON.stringify(await pending), 'application/json; charset=utf-8');
-      }
-      const route = Object.hasOwn(routes, request.url ?? '') ? routes[request.url!] : undefined;
-      if (!route) return end(404, 'Not found');
-      const file = await confined(assets, route[0]);
-      return end(200, (await boundedRead(file, 256 * 1024)).text, route[1]);
-    } catch { return end(503, 'Unavailable'); }
-    finally { active--; }
-  });
-  server.requestTimeout = 5000; server.headersTimeout = 5000; server.keepAliveTimeout = 1000;
-  server.maxConnections = 16;
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(); });
-  });
-  port = (server.address() as { port: number }).port;
-  let closed: Promise<void> | undefined;
-  return { port, url: `http://127.0.0.1:${port}/`, close() {
-    closing = true;
-    return closed ??= new Promise<void>((resolve, reject) => {
-      server.close(error => error ? reject(error) : resolve());
-      server.closeAllConnections();
-    });
-  } };
 }

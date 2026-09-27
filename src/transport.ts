@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { fail, port, text } from './config.js';
+import type { ReportStatus } from './reports.js';
 
 export const BODY_LIMIT = 64 * 1024;
 export const RECEIPT_TIMEOUT = 5000;
-export type Kind = 'message' | 'registration' | 'status' | 'request_status' | 'reload' | 'stop' | 'close';
+export type Kind = 'message' | 'report' | 'registration' | 'status' | 'request_status' | 'reload' | 'stop' | 'close';
 export interface Envelope {
   version: 1;
   kind: Kind;
@@ -13,13 +14,21 @@ export interface Envelope {
   /** Optional diagnostics correlation only; never authentication or agent identity. */
   correlationId?: string;
 }
+export function reportPayload(payload: Record<string, unknown>): { status: ReportStatus; summary: string } {
+  if (!['blocked', 'needs_decision', 'ready_for_review', 'clear'].includes(payload.status as string)) fail('invalid report status');
+  const status = payload.status as ReportStatus;
+  const summary = payload.summary ?? '';
+  if (typeof summary !== 'string' || summary.length > 2000 || (status !== 'clear' && !summary.trim()) || (status === 'clear' && summary !== '')) fail('report requires a public summary of 1–2000 characters, or empty summary for clear');
+  return { status, summary };
+}
 export function envelope(value: unknown): Envelope {
   const m = value as Envelope;
-  if (!m || m.version !== 1 || !['message', 'registration', 'status', 'request_status', 'reload', 'stop', 'close'].includes(m.kind)) fail('invalid wire schema/version/kind');
+  if (!m || m.version !== 1 || !['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close'].includes(m.kind)) fail('invalid wire schema/version/kind');
   text(m.from, 'sender sessionId', 256); text(m.to, 'recipient sessionId', 256);
   if (m.correlationId !== undefined && (typeof m.correlationId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(m.correlationId))) fail('invalid correlation ID');
   if (!m.payload || Array.isArray(m.payload) || typeof m.payload !== 'object') fail('invalid payload');
   if (m.kind === 'message') text(m.payload.message, 'message', 48000);
+  if (m.kind === 'report') reportPayload(m.payload);
   if (m.kind === 'registration' || m.kind === 'status') port(m.payload.port);
   if (m.kind === 'registration') text(m.payload.projectDirectory, 'projectDirectory');
   if (m.kind === 'status' && typeof m.payload.busy !== 'boolean') fail('invalid busy flag');

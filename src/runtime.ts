@@ -2,7 +2,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
 import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, type Agent, type Config } from './config.js';
-import { listen, send, type Endpoint, type Envelope, type Kind } from './transport.js';
+import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
+import { saveWorkerReport } from './reports.js';
+import { readObservationSnapshot } from './snapshot.js';
+import { workerStatusPage } from './worker-status.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and close_worker are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. See references/implementation-blocker.md. A verified supported host API is required (no version-only override).';
 export interface Host {
@@ -30,6 +33,8 @@ export class Intercom {
   responsibility?: Agent;
   private observer?: Observer;
   private closing?: Promise<void>;
+  private reportWrites: Promise<void> = Promise.resolve();
+  private pendingReports = 0;
   private captureObserver(): (event: EventType, metadata?: EventMetadata) => void {
     const observer = this.observer;
     return (event, metadata = {}) => {
@@ -139,12 +144,13 @@ export class Intercom {
     assertValid();
     return { id, config, me: config.agents.find(a => a.sessionId === id) };
   }
-  /** Persist an actual dashboard bind; saved discovery metadata, not a live-status assertion. */
-  async recordDashboardPort(boundPort: number): Promise<void> {
+  /** Accept old configs, but retire the removed browser dashboard's discovery metadata. */
+  async retireDashboardMetadata(): Promise<void> {
     const record = this.captureObserver(), assertValid = this.validity();
     const { id, config } = await this.state();
-    assertValid(); requireCoordinator(config, id); port(boundPort);
-    await this.store.update(id, c => { requireCoordinator(c, id).dashboardPort = boundPort; }, assertValid);
+    assertValid();
+    if (requireCoordinator(config, id).dashboardPort === undefined) return;
+    await this.store.update(id, c => { delete requireCoordinator(c, id).dashboardPort; }, assertValid);
     record('config.changed', { outcome: 'written' });
   }
   async reload(): Promise<void> {
@@ -233,6 +239,27 @@ export class Intercom {
       }
       return;
     }
+    if (message.kind === 'report') {
+      requireCoordinator(config, id);
+      if (!sender || sender.coordinator) fail('work reports require a configured worker sender');
+      const payload = reportPayload(message.payload);
+      if (this.pendingReports >= 64) fail('report queue full; no report stored');
+      this.pendingReports++;
+      const pending = this.reportWrites.then(async () => {
+        assertValid();
+        const fresh = await this.state();
+        requireCoordinator(fresh.config, id);
+        if (!fresh.config.agents.some(agent => agent.sessionId === message.from && !agent.coordinator)) fail('reporting worker is no longer configured');
+        await saveWorkerReport(this.store.root, { version: 1, sessionId: message.from, ...payload, updatedAt: new Date().toISOString() }, assertValid);
+        assertValid();
+        try {
+          notify('worker report', `Report: ${payload.status}\n${payload.summary}\nThis is a worker-authored public report, not approval or verified completion. Evaluate it before deciding any next step. Clearing retires the report only; it does not resume or complete work.`);
+        } catch { fail('Report stored, but coordinator notification failed or became uncertain; do not blindly resend'); }
+      });
+      this.reportWrites = pending.catch(() => {}).finally(() => { this.pendingReports--; });
+      await pending;
+      return;
+    }
     if (message.kind === 'message') {
       if (!sender || !me) fail('agent messaging requires configured sender and recipient; anonymous permissions TODO');
       if (!this.responsibility) fail('worker must load responsibility before receiving work');
@@ -260,12 +287,23 @@ export class Intercom {
     const assertValid = this.validity();
     const { id, config, me } = await this.state();
     assertValid();
+    if (operation === 'worker_status') {
+      if (!me) fail('worker_status requires a configured session');
+      const snapshot = await readObservationSnapshot(this.store.root);
+      assertValid();
+      return workerStatusPage(snapshot, { name: args.name as string | undefined, offset: args.offset as number | undefined, limit: args.limit as number | undefined });
+    }
     if (operation === 'list') {
       if (!me) fail('anonymous intercom_list permissions unresolved (TODO); no coordinator privileges');
-      const dashboardPort = coordinator(config).dashboardPort;
-      return { ...config, dashboardUrl: dashboardPort === undefined ? null : `http://127.0.0.1:${dashboardPort}/` };
+      return { ...config, agents: config.agents.map(({ dashboardPort: _retired, ...agent }) => agent) };
     }
     if (operation === 'report_status') { await this.report(); return { accepted: true }; }
+    if (operation === 'report_work') {
+      if (!me || me.coordinator || !this.responsibility) fail('report_work requires a configured, responsibility-loaded worker');
+      const payload = reportPayload(args);
+      await this.transmit(coordinator(config).name, 'report', payload);
+      return { accepted: true, coordinatorEvaluation: 'not awaited' };
+    }
     if (operation === 'send') {
       if (!me || !this.responsibility) fail('anonymous/unloaded worker cannot send agent messages (permissions TODO)');
       await this.transmit(args.to as string, 'message', { message: args.message }); return { accepted: true, completion: 'not awaited' };

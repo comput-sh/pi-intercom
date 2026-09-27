@@ -5,7 +5,8 @@ import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMut
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { launchers } from './launcher.js';
-import { startDashboard, type Dashboard } from './dashboard.js';
+import { ensureMonitorPane } from './monitor-launcher.js';
+import { createActivityTracker } from './activity.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
 const tools: [string, string, TSchema][] = [
@@ -13,8 +14,10 @@ const tools: [string, string, TSchema][] = [
   ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }) })],
   ['reload_worker', 'Coordinator only. Ask worker to reread responsibility and synchronize names. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
   ['send', 'Configured sessions only. Send an explicit work/progress/findings message by recipient name. Idle delivery starts a turn; busy delivery steers at supported boundaries. Receipt is not an agent reply. Progress questions do not cancel assignments.', Type.Object({ to: Type.String(), message: Type.String({ minLength: 1, maxLength: 48000 }) })],
+  ['worker_status', 'Configured sessions only. Read paginated JSON worker observations and public reports from local files, optionally by worker name. Last-observed status is not live liveness or task completion; reports are self-reported, not approval. No worker prompts, live probing or Telegram dependency. Follow nextOffset for further pages; null report means no readable active report.', Type.Object({ name: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) })],
   ['list', 'Configured sessions only. Read current saved names, responsibilities, session IDs, roles and ports. No live probing. Output limited to 50 KiB/2000 lines; full data remains in config.json.', Type.Object({})],
   ['request_status', 'Coordinator only. Ask worker extension to send an independent sessionId/port/busy report without a model turn on worker. No synchronous status reply.', to],
+  ['report_work', 'Configured, responsibility-loaded workers only. Store one public report (blocked, needs_decision, ready_for_review) and notify the coordinator; clear retires it. Summary required except clear (omit or empty). Never include private reasoning, credentials, raw tool payloads, or secrets. Receipt is not approval, verified completion, or permission for follow-up work.', Type.Object({ status: Type.String({ enum: ['blocked', 'needs_decision', 'ready_for_review', 'clear'] }), summary: Type.Optional(Type.String({ maxLength: 2000 })) })],
   ['report_status', 'Worker only (including anonymous). Send runtime sessionId/port/busy report to coordinator. This is NOT registration and creates no config entry.', Type.Object({})],
   ['stop_worker', UNSUPPORTED_CANCELLATION, to],
   ['close_worker', UNSUPPORTED_CANCELLATION, to],
@@ -43,16 +46,23 @@ class PiConfigStore extends ConfigStore {
 export default function intercomExtension(pi: ExtensionAPI): void {
   let runtime: Intercom | undefined;
   let context: ExtensionContext | undefined;
-  let dashboard: Dashboard | undefined;
   let generation = 0;
+  let activityOutcome: 'started' | 'settled' | 'snapshot' = 'snapshot';
+  const activity = createActivityTracker((phase, detail) => {
+    runtime?.recordObservation('host.activity', { busy: phase !== 'idle', phase, detail, outcome: activityOutcome });
+  });
   const launcher = launchers({
     extension: fileURLToPath(import.meta.url),
     sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
   });
   pi.on('session_start', async (_event, ctx) => {
     const started = ++generation;
-    await dashboard?.close(); dashboard = undefined;
-    await runtime?.close(); context = ctx;
+    activity.reset();
+    const oldRuntime = runtime;
+    runtime = undefined;
+    await oldRuntime?.close();
+    if (started !== generation) return;
+    context = ctx;
     if (!['win32', 'linux'].includes(process.platform) || ctx.mode !== 'tui') throw new Error('PiIntercom requires Windows or Linux interactive Pi. No resources started.');
     if (!ctx.isProjectTrusted()) throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
     runtime = new Intercom({
@@ -68,39 +78,57 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     const current = runtime;
     try { await current.start(); }
     catch (e) { if (runtime === current) runtime = undefined; ctx.ui.notify(String(e), 'error'); return; }
-    if (started !== generation) return;
-    let server: Dashboard | undefined;
-    let savingPort = false;
+    if (started !== generation) { await current.close(); return; }
     try {
       if ((await current.state()).me?.coordinator) {
-        server = await startDashboard(current.store.root);
-        if (started !== generation) { await server.close(); return; }
-        savingPort = true;
-        await current.recordDashboardPort(server.port);
-        if (started !== generation) { await server.close(); return; }
-        dashboard = server;
-        ctx.ui.notify(`Intercom read-only dashboard: ${server.url} (saved URL is last-known, not live availability)`, 'info');
+        try { await current.retireDashboardMetadata(); }
+        catch (error) {
+          if (started !== generation) return;
+          ctx.ui.notify(`Legacy dashboard metadata cleanup failed; messaging remains available: ${String(error)}`, 'warning');
+        }
+        if (started !== generation) return;
+        const monitor = await ensureMonitorPane({
+          root: current.store.root, sessionId: ctx.sessionManager.getSessionId(),
+          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
+          assertCurrent: () => { if (started !== generation || runtime !== current) throw new Error('Coordinator session changed'); },
+        });
+        if (started !== generation) return;
+        ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
       }
-    } catch {
-      await server?.close().catch(() => {});
+    } catch (error) {
       if (started !== generation) return;
-      ctx.ui.notify(savingPort
-        ? 'Intercom dashboard port could not be saved; the new dashboard was closed. Any saved URL is last-known only. Messaging remains available.'
-        : 'Intercom dashboard unavailable; communication remains independent.', 'error');
+      ctx.ui.notify(String(error), 'warning');
     }
   });
   pi.on('session_shutdown', async () => {
     generation++;
-    await dashboard?.close(); dashboard = undefined;
-    await runtime?.close(); runtime = undefined; context = undefined;
+    activity.reset();
+    const oldRuntime = runtime;
+    runtime = undefined; context = undefined;
+    await oldRuntime?.close();
   });
   pi.on('agent_start', async (_event, ctx) => {
     context = ctx;
-    runtime?.recordObservation('host.activity', { busy: !ctx.isIdle(), outcome: 'started' });
+    activityOutcome = 'started';
+    try { activity.start(); } finally { activityOutcome = 'snapshot'; }
   });
   pi.on('agent_settled', async (_event, ctx) => {
     context = ctx;
-    runtime?.recordObservation('host.activity', { busy: !ctx.isIdle(), outcome: 'settled' });
+    activityOutcome = 'settled';
+    try { activity.settled(); } finally { activityOutcome = 'snapshot'; }
+  });
+  pi.on('message_update', (event, ctx) => {
+    context = ctx;
+    // Inspect the event discriminator only. Never access reasoning/text payloads.
+    activity.message(event.assistantMessageEvent.type);
+  });
+  pi.on('tool_execution_start', (event, ctx) => {
+    context = ctx;
+    activity.toolStart(event.toolCallId, event.toolName);
+  });
+  pi.on('tool_execution_end', (event, ctx) => {
+    context = ctx;
+    activity.toolEnd(event.toolCallId);
   });
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;

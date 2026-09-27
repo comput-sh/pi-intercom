@@ -55,5 +55,7 @@ jobs:
             throw new Error('Release tag must match package.json version');
           }
           NODE
+      - run: npm ci
+      - run: npm run build
       - name: Publish with OIDC provenance
         run: npm publish --access public --provenance --ignore-scripts

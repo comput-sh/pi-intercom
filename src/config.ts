@@ -8,7 +8,7 @@ export interface Agent {
   coordinator: boolean;
   description: string;
   port: number;
-  /** Last bound dashboard port, coordinator only; not evidence of a live server. */
+  /** Legacy browser dashboard field, accepted for migration only; removed at coordinator startup. */
   dashboardPort?: number;
   projectDirectory: string;
 }

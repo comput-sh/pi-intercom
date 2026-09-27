@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore } from '../dist/config.js';
 import { listen, send } from '../dist/transport.js';
-import { readDashboardSnapshot } from '../dist/dashboard.js';
+import { readObservationSnapshot } from '../dist/snapshot.js';
 
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
@@ -24,7 +24,7 @@ async function adapter(t) {
   };
   const inheritedHerdr = process.env.HERDR_ENV;
   delete process.env.HERDR_ENV;
-  const tools = new Map(), events = new Map(), messages = [], notices = [], names = [];
+  const tools = new Map(), events = new Map(), messages = [], notices = [], names = [], widgets = [];
   let id = 'adapter-coordinator', idle = true, name = '', failName = false;
   const pi = {
     registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => events.set(event, handler),
@@ -34,7 +34,8 @@ async function adapter(t) {
   };
   extension(pi);
   const ctx = { cwd: root, mode: 'tui', isProjectTrusted: () => true, isIdle: () => idle,
-    sessionManager: { getSessionId: () => id }, ui: { notify: (text, level) => notices.push({ text, level }) } };
+    sessionManager: { getSessionId: () => id }, ui: { notify: (text, level) => notices.push({ text, level }),
+      setWidget: (...args) => widgets.push(args) } };
   t.after(async () => {
     try { await events.get('session_shutdown')(); }
     finally {
@@ -43,7 +44,7 @@ async function adapter(t) {
       await rm(root, { recursive: true, force: true });
     }
   });
-  return { root, ctx, tools, events, messages, notices, names,
+  return { root, ctx, tools, events, messages, notices, names, widgets,
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
     setDelivery: deliver => { pi.sendUserMessage = deliver; },
     start: () => events.get('session_start')({}, ctx),
@@ -52,11 +53,37 @@ async function adapter(t) {
 }
 const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? 'Windows/Linux extension startup adapter' : false };
 
+test('standalone monitor replaces inline widget and missing Herdr never prevents messaging', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  assert.equal(a.widgets.length, 0);
+  assert.equal(a.messages.length, 0);
+  assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
+  a.setId('monitor-replacement-worker'); await a.start();
+  assert.equal(a.widgets.length, 0);
+});
+
+test('phase telemetry uses only public discriminants and never reads reasoning or tool payloads', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  await a.events.get('agent_start')({}, a.ctx);
+  const privatePayload = { get delta() { assert.fail('must not read reasoning'); }, type: 'thinking_delta' };
+  await a.events.get('message_update')({ assistantMessageEvent: privatePayload, get message() { assert.fail('must not read message'); } }, a.ctx);
+  await a.events.get('message_update')({ assistantMessageEvent: privatePayload }, a.ctx);
+  await a.events.get('tool_execution_start')({ toolCallId: 't', toolName: 'read', get args() { assert.fail('must not read arguments'); } }, a.ctx);
+  await a.events.get('tool_execution_end')({ toolCallId: 't', get result() { assert.fail('must not read result'); } }, a.ctx);
+  await a.events.get('agent_settled')({}, a.ctx);
+  await a.events.get('session_shutdown')();
+  const snapshot = await readObservationSnapshot(a.root);
+  const phases = snapshot.events.filter(e => e.event === 'host.activity');
+  assert.deepEqual(phases.map(e => [e.phase, e.detail]), [
+    ['working', 'processing'], ['thinking', 'thinking'], ['tool', 'reading_files'], ['working', 'processing'], ['idle', 'settled'],
+  ]);
+});
+
 test('single extension registers all agreed tools without starting resources in factory', async () => {
   const tools = new Map(), events = new Map();
   extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
-  assert.equal(tools.size, 12);
-  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'agent_start', 'agent_settled', 'before_agent_start']);
+  assert.equal(tools.size, 14);
+  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
@@ -166,80 +193,79 @@ test('adapter anonymous configure/reload loads responsibility without a work tur
   assert.match(a.messages[0].content, /Explicit review task/);
 });
 
-test('adapter activity hooks record snapshots only and coordinator dashboard shuts down with session', supportedHost, async t => {
-  const a = await adapter(t); await a.start();
-  const notice = a.notices.find(item => item.text.includes('read-only dashboard:'));
-  assert.ok(notice);
-  const url = notice.text.match(/http:\/\/127\.0\.0\.1:\d+\//)[0];
-  assert.equal((await fetch(`${url}api/snapshot`)).status, 200);
-  const store = new ConfigStore(a.root), config = await store.read();
-  assert.equal(config.agents.find(agent => agent.coordinator).dashboardPort, Number(new URL(url).port));
+test('coordinator startup opens only the messaging listener and activity hooks stay passive', supportedHost, async t => {
+  const a = await adapter(t), bound = [];
+  const originalListen = Server.prototype.listen;
+  Server.prototype.listen = function(...args) {
+    this.once('listening', () => { const address = this.address(); if (address && typeof address !== 'string') bound.push(address.port); });
+    return originalListen.apply(this, args);
+  };
+  try { await a.start(); } finally { Server.prototype.listen = originalListen; }
+  const config = await new ConfigStore(a.root).read();
+  assert.deepEqual(bound, [config.agents[0].port]);
+  assert.equal(a.notices.some(n => /read-only dashboard:|http:\/\//.test(n.text)), false);
   const list = JSON.parse((await a.invoke('list')).content[0].text);
-  assert.equal(list.dashboardUrl, url);
+  assert.equal(list.dashboardUrl, undefined);
   a.setIdle(false);
   await a.events.get('agent_start')({ message: 'PRIVATE_EVENT_BODY' }, a.ctx);
   a.setIdle(true);
   await a.events.get('agent_settled')({ message: 'PRIVATE_EVENT_BODY' }, a.ctx);
   assert.equal(a.messages.length, 0, 'activity telemetry must not prompt a worker');
   await a.events.get('session_shutdown')();
-  await assert.rejects(fetch(`${url}api/snapshot`));
-  const snapshot = await readDashboardSnapshot(a.root);
+  await assert.rejects(send(bound[0], { version: 1, kind: 'message', from: 'adapter-coordinator', to: 'adapter-coordinator', payload: { message: 'closed' } }));
+  const snapshot = await readObservationSnapshot(a.root);
   const activity = snapshot.events.filter(event => event.event === 'host.activity');
   assert.deepEqual(activity.map(event => [event.outcome, event.busy]), [['started', true], ['settled', false]]);
   assert.doesNotMatch(JSON.stringify(snapshot.events), /PRIVATE_EVENT_BODY|task\.completed/);
 });
 
-test('adapter failed dashboard-port persistence closes dashboard without false readiness or lost communication', supportedHost, async t => {
-  const a = await adapter(t), bound = [];
-  const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
+test('failed legacy metadata migration leaves messaging usable', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('adapter-coordinator', 12345);
+  const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
+  await writeFile(store.file, JSON.stringify(legacy));
+  const originalUpdate = ConfigStore.prototype.update;
   ConfigStore.prototype.update = function(id, mutate, guard) {
     return originalUpdate.call(this, id, async config => {
+      const hadLegacy = config.agents.some(agent => agent.dashboardPort !== undefined);
       await mutate(config);
-      if (config.agents.some(agent => agent.dashboardPort !== undefined)) throw new Error('injected dashboard persistence failure');
+      if (hadLegacy && !config.agents.some(agent => agent.dashboardPort !== undefined)) throw new Error('injected migration failure');
     }, guard);
   };
-  Server.prototype.listen = function(...args) {
-    this.once('listening', () => { const address = this.address(); if (address && typeof address !== 'string') bound.push(address.port); });
-    return originalListen.apply(this, args);
-  };
-  try { await a.start(); }
-  finally { ConfigStore.prototype.update = originalUpdate; Server.prototype.listen = originalListen; }
-  assert.equal(bound.length, 2, 'both communication and dashboard bound test-only loopback ports');
-  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
-  assert.ok(a.notices.some(notice => /dashboard port could not be saved/i.test(notice.text)));
-  const config = await new ConfigStore(a.root).read();
-  assert.equal(config.agents[0].dashboardPort, undefined);
-  const dashboardPort = bound.find(port => port !== config.agents[0].port);
-  await assert.rejects(fetch(`http://127.0.0.1:${dashboardPort}/api/snapshot`));
-  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives dashboard persistence failure' });
+  try { await a.start(); } finally { ConfigStore.prototype.update = originalUpdate; }
+  assert.ok(a.notices.some(notice => ['warning', 'error'].includes(notice.level) && /legacy|migration|metadata/i.test(notice.text)));
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).agents[0].dashboardPort, 34568);
+  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives migration failure' });
   assert.equal(a.messages.length, 1);
 });
 
-test('adapter dashboard bind failure preserves legacy config and communication without claiming a URL', supportedHost, async t => {
-  const a = await adapter(t), originalListen = Server.prototype.listen;
-  let listens = 0;
-  Server.prototype.listen = function(...args) {
-    if (++listens === 2) throw Object.assign(new Error('injected dashboard bind failure'), { code: 'EACCES' });
-    return originalListen.apply(this, args);
-  };
-  try { await a.start(); } finally { Server.prototype.listen = originalListen; }
-  assert.equal(listens, 2);
-  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
-  assert.equal((await new ConfigStore(a.root).read()).agents[0].dashboardPort, undefined);
-  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives dashboard bind failure' });
+test('coordinator startup removes legacy dashboardPort without exposing a browser URL', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('adapter-coordinator', 12345);
+  const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
+  await writeFile(store.file, JSON.stringify(legacy));
+  await a.start();
+  assert.equal(JSON.parse(await readFile(store.file, 'utf8')).agents[0].dashboardPort, undefined);
+  const list = JSON.parse((await a.invoke('list')).content[0].text);
+  assert.equal(list.dashboardUrl, undefined);
+  await a.invoke('send', { to: 'Coordinator', message: 'Messaging survives browser retirement' });
   assert.equal(a.messages.length, 1);
 });
 
-test('adapter shutdown during pending dashboard-port persistence cannot publish readiness or leave dashboard listening', supportedHost, async t => {
-  const a = await adapter(t), bound = [];
+test('shutdown during pending legacy migration fences the write and new monitor setup', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root), bound = [];
+  await store.initialize('adapter-coordinator', 12345);
+  const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
+  await writeFile(store.file, JSON.stringify(legacy));
   const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
   let entered, release;
   const pendingWrite = new Promise(resolve => { entered = resolve; });
   const gate = new Promise(resolve => { release = resolve; });
   ConfigStore.prototype.update = function(id, mutate, guard) {
     return originalUpdate.call(this, id, async config => {
+      const hadLegacy = config.agents.some(agent => agent.dashboardPort !== undefined);
       await mutate(config);
-      if (config.agents.some(agent => agent.dashboardPort !== undefined)) { entered(); await gate; }
+      if (hadLegacy && !config.agents.some(agent => agent.dashboardPort !== undefined)) { entered(); await gate; }
     }, guard);
   };
   Server.prototype.listen = function(...args) {
@@ -249,8 +275,7 @@ test('adapter shutdown during pending dashboard-port persistence cannot publish 
   let starting;
   try {
     starting = a.start();
-    // If startup fails before reaching persistence, fail instead of waiting forever.
-    await Promise.race([pendingWrite, starting.then(() => { throw new Error('startup ended before dashboard save'); })]);
+    await Promise.race([pendingWrite, starting.then(() => { throw new Error('startup ended before migration'); })]);
     await a.events.get('session_shutdown')();
     release(); await starting;
   } finally {
@@ -258,11 +283,11 @@ test('adapter shutdown during pending dashboard-port persistence cannot publish 
     ConfigStore.prototype.update = originalUpdate; Server.prototype.listen = originalListen;
     await starting;
   }
-  assert.equal(bound.length, 2);
-  assert.equal(a.notices.some(notice => notice.text.includes('read-only dashboard:')), false);
-  const saved = JSON.parse(await readFile(new ConfigStore(a.root).file, 'utf8'));
-  assert.equal(saved.agents[0].dashboardPort, undefined);
-  for (const port of bound) await assert.rejects(fetch(`http://127.0.0.1:${port}/api/snapshot`));
+  assert.equal(bound.length, 1);
+  assert.equal(a.notices.some(notice => /monitor|Herdr/i.test(notice.text)), false, 'obsolete startup never reaches monitor ensure');
+  const saved = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(saved.agents[0].dashboardPort, 34568, 'guard prevents obsolete migration write');
+  await assert.rejects(send(bound[0], { version: 1, kind: 'message', from: 'adapter-coordinator', to: 'adapter-coordinator', payload: { message: 'closed' } }));
   await assert.rejects(a.invoke('list'), /not initialized/);
 });
 

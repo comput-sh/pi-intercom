@@ -38,6 +38,9 @@ test('writer emits allowlisted metadata only and marks graceful close without ch
 test('sanitizer projects disk input and refuses unknown events and unbounded identities', () => {
   const valid = { version: 1, timestamp: new Date().toISOString(), writerId: randomUUID(), sessionId: 's', event: 'runtime.ready' };
   assert.equal(sanitizeObservation({ ...valid, message: 'secret', errorCode: 'secret', peerName: 'bad\nname' }).message, undefined);
+  assert.equal(sanitizeObservation({ ...valid, phase: 'PRIVATE_THINKING', detail: 'PRIVATE_COMMAND' }).phase, undefined);
+  assert.equal(sanitizeObservation({ ...valid, phase: 'PRIVATE_THINKING', detail: 'PRIVATE_COMMAND' }).detail, undefined);
+  assert.equal(sanitizeObservation({ ...valid, phase: 'thinking', detail: 'thinking' }).phase, 'thinking');
   assert.equal(sanitizeObservation({ ...valid, event: 'secret' }), undefined);
   assert.equal(sanitizeObservation({ ...valid, sessionId: 'x'.repeat(257) }), undefined);
   assert.equal(sanitizeObservation({ ...valid, writerId: 'not-a-uuid' }), undefined);

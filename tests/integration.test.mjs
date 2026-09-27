@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
 import { ConfigStore } from '../dist/config.js';
+import { readWorkerReports } from '../dist/reports.js';
+import { readObservationSnapshot } from '../dist/snapshot.js';
+import { envelope } from '../dist/transport.js';
 
 async function setup(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-integration-'));
@@ -58,29 +61,76 @@ test('anonymous registration explicitly hands ID/port/directory to agent, config
   await c.runtime.tool('reload_worker', { to: 'bUILDER' });
   assert.equal(w.runtime.responsibility.description, 'Remit'); assert.deepEqual(w.names, ['Builder']); assert.equal(w.messages.length, 0);
 });
-test('dashboard port persistence is coordinator-only and list derives a passive saved URL for both roles', async t => {
+test('worker status reads local JSON without sending messages or probing workers', async t => {
+  const { c, w, start, wire } = await configured(t);
+  const anonymous = await start('status-anonymous');
+  const before = wire.length;
+  const result = await c.runtime.tool('worker_status', { name: 'Builder' });
+  assert.equal(result.source, 'local-observations');
+  assert.equal(result.workers.length, 1);
+  assert.equal(result.workers[0].sessionId, 'w');
+  assert.equal(wire.length, before);
+  await w.runtime.tool('worker_status', {});
+  await assert.rejects(anonymous.runtime.tool('worker_status', {}), /configured/);
+});
+
+test('work reports persist as public worker-authored state and notify without approving or assigning', async t => {
+  const { c, w, root, launches } = await configured(t);
+  const before = c.messages.length;
+  for (const status of ['blocked', 'needs_decision', 'ready_for_review']) {
+    const result = await w.runtime.tool('report_work', { status, summary: 'Public finding and requested decision' });
+    assert.equal(result.accepted, true);
+    const [report] = await readWorkerReports(root, ['w']);
+    assert.equal(report.status, status); assert.equal(report.sessionId, 'w');
+    assert.equal((await readObservationSnapshot(root)).reports[0].status, status);
+    assert.match(c.messages.at(-1).text, /not approval or verified completion/);
+  }
+  await w.runtime.tool('report_work', { status: 'clear' });
+  assert.equal((await readWorkerReports(root, ['w']))[0].status, 'clear');
+  assert.equal(c.messages.length, before + 4);
+  assert.equal(launches.length, 0);
+});
+test('work reports reject anonymous/unloaded/coordinator senders, worker destinations and bad payloads', async t => {
+  const { c, w, start, root } = await configured(t);
+  const anonymous = await start('anonymous');
+  for (const runtime of [c.runtime, anonymous.runtime]) await assert.rejects(runtime.tool('report_work', { status: 'blocked', summary: 'x' }), /configured.*worker/);
+  w.runtime.responsibility = undefined;
+  await assert.rejects(w.runtime.tool('report_work', { status: 'blocked', summary: 'x' }), /configured.*worker/);
+  const message = { version: 1, kind: 'report', from: 'w', to: 'c', payload: { status: 'blocked', summary: 'x' } };
+  await assert.rejects(w.runtime.receive({ ...message, to: 'w' }), /permission/);
+  await assert.rejects(c.runtime.receive({ ...message, from: 'anonymous' }), /configured worker/);
+  await assert.rejects(c.runtime.receive({ ...message, from: 'c' }), /configured worker/);
+  for (const payload of [{status:'done',summary:'x'}, {status:'blocked',summary:''}, {status:'clear',summary:'x'}, {status:'needs_decision',summary:'x'.repeat(2001)}]) {
+    assert.throws(() => envelope({ ...message, payload }), /report/);
+    await assert.rejects(c.runtime.receive({ ...message, payload }), /report/);
+  }
+  assert.deepEqual(await readWorkerReports(root, ['w']), []);
+});
+test('report updates serialize, ignore payload identity and keep stored report if notification fails', async t => {
+  const { c, w, root } = await configured(t);
+  await Promise.all([
+    w.runtime.tool('report_work', { status: 'blocked', summary: 'first' }),
+    w.runtime.tool('report_work', { status: 'clear' }),
+  ]);
+  assert.equal((await readWorkerReports(root, ['w']))[0].status, 'clear');
+  c.host.deliver = () => { throw new Error('notification rejected'); };
+  await assert.rejects(c.runtime.receive({ version:1, kind:'report', from:'w', to:'c', payload:{status:'ready_for_review',summary:'public result',sessionId:'c'} }), /Report stored.*notification/);
+  assert.equal((await readWorkerReports(root, ['w']))[0].status, 'ready_for_review');
+  assert.deepEqual(await readWorkerReports(root, ['c']), []);
+});
+
+test('retired dashboard metadata migrates only as coordinator and is never advertised by list', async t => {
   const { c, w, wire } = await configured(t);
   const original = await c.runtime.store.read(), before = wire.length;
-  for (const runtime of [c.runtime, w.runtime]) {
-    assert.deepEqual(await runtime.tool('list', {}), { ...original, dashboardUrl: null });
-  }
-  await assert.rejects(w.runtime.recordDashboardPort(42000), /permission/);
-  await assert.rejects(c.runtime.recordDashboardPort(0), /invalid port/);
+  await c.runtime.store.update('c', config => { config.agents.find(a => a.coordinator).dashboardPort = 42000; });
+  for (const runtime of [c.runtime, w.runtime]) assert.deepEqual(await runtime.tool('list', {}), original);
+  await assert.rejects(w.runtime.retireDashboardMetadata(), /permission/);
+  assert.equal((await c.runtime.store.read()).agents[0].dashboardPort, 42000);
+  await c.runtime.retireDashboardMetadata();
   assert.deepEqual(await c.runtime.store.read(), original);
-  await c.runtime.recordDashboardPort(42000);
-  const saved = await c.runtime.store.read();
-  assert.equal(saved.agents.find(a => a.coordinator).dashboardPort, 42000);
-  assert.equal(saved.dashboardUrl, undefined);
-  assert.deepEqual(saved.agents.filter(a => !a.coordinator), original.agents.filter(a => !a.coordinator));
-  for (const runtime of [c.runtime, w.runtime]) {
-    assert.deepEqual(await runtime.tool('list', {}), { ...saved, dashboardUrl: 'http://127.0.0.1:42000/' });
-  }
-  await c.runtime.recordDashboardPort(43000);
-  assert.equal((await w.runtime.tool('list', {})).dashboardUrl, 'http://127.0.0.1:43000/');
-  await c.runtime.close();
-  assert.equal((await w.runtime.tool('list', {})).dashboardUrl, 'http://127.0.0.1:43000/');
-  assert.equal((await w.runtime.store.read()).agents[0].dashboardPort, 43000);
-  assert.equal(wire.length, before, 'discovery must not probe, notify, or send transport messages');
+  await c.runtime.retireDashboardMetadata();
+  for (const runtime of [c.runtime, w.runtime]) assert.deepEqual(await runtime.tool('list', {}), original);
+  assert.equal(wire.length, before, 'migration/list must not prompt workers or probe endpoints');
 });
 test('idle/steering messages and independent status reports share reporting without worker turn', async t => {
   const { c, w, wire } = await configured(t);
@@ -186,7 +236,9 @@ test('close or session switch during directory resolution prevents create/resume
 test('close invalidates queued coordinator tool and status writes', async t => {
   for (const operation of ['configure_worker', 'set_multiplexer', 'remove_worker', 'status', 'dashboard_port']) {
     const { c } = await configured(t);
-    const store = c.runtime.store, original = await store.read();
+    const store = c.runtime.store;
+    if (operation === 'dashboard_port') await store.update('c', config => { config.agents[0].dashboardPort = 42000; });
+    const original = await store.read();
     let release, entered, queued;
     const started = new Promise(resolve => { entered = resolve; });
     const blocker = store.update('c', async () => { entered(); await new Promise(resolve => { release = resolve; }); });
@@ -196,7 +248,7 @@ test('close invalidates queued coordinator tool and status writes', async t => {
     store.update = (...args) => { queued(); return update(...args); };
     const pending = operation === 'status'
       ? c.runtime.receive({ version: 1, kind: 'status', from: 'w', to: 'c', payload: { port: 49999, busy: false } })
-      : operation === 'dashboard_port' ? c.runtime.recordDashboardPort(42000)
+      : operation === 'dashboard_port' ? c.runtime.retireDashboardMetadata()
       : c.runtime.tool(operation, { to: 'Builder', multiplexer: 'none', sessionId: 'w2', name: 'Other', port: 40001, projectDirectory: '.', description: 'Other remit' });
     const rejected = assert.rejects(pending, /inactive|replaced/);
     await reachedQueue;
