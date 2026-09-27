@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from 'node:util';
-import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { truncateToWidth, visibleWidth } from 'pi-intercom-tui';
 import type { ObservationSnapshot } from './snapshot.js';
 import { workerObservation } from './worker-status.js';
 

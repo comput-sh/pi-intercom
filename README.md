@@ -48,7 +48,7 @@ Status is **last reported**, not proof of a live connection. An idle worker's la
 
 ## Quick start
 
-**Requirements:** Windows or Linux, Node 22+, interactive [Pi](https://github.com/earendil-works/pi), and project trust. Use Herdr for worker tabs on either platform; Linux worker launching requires it. Pi/package installation supplies the declared peer dependencies (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `typebox`).
+**Requirements:** Windows or Linux, Node 22.19+, interactive [Pi](https://github.com/earendil-works/pi), and project trust. Use Herdr for worker tabs on either platform; Linux worker launching requires it. Pi supplies the extension's host peers (`@earendil-works/pi-coding-agent`, `typebox`). The separate Node monitor uses its own pinned runtime dependency, `pi-intercom-tui` (an npm alias of `@earendil-works/pi-tui`), installed even when Pi disables peer installation. It does not depend on Pi's extension loader or a machine-specific host installation path.
 
 ### Install the published extension
 
@@ -234,7 +234,7 @@ npm run check:package
 PI_INTERCOM_PI_ROOT='C:/path/to/pi-coding-agent' npm run test:host
 ```
 
-The extension source runs through Pi's TypeScript loader; `npm run build` generates `dist` for tests and the standalone terminal monitor. Build output is included in releases; the publish job builds it explicitly before publishing with scripts disabled. Pi core/typebox are peer dependencies, not bundled; pinned development copies are included in the lockfile for reproducible CI without local junctions.
+The extension source runs through Pi's TypeScript loader; `npm run build` generates `dist` for tests and the standalone terminal monitor. Build output is included in releases; the publish job builds it explicitly before publishing with scripts disabled. `npm run check:package` also installs the tarball in an isolated directory with peer installation disabled (matching Pi's managed npm installs), verifies the standalone monitor imports without host packages, and checks its non-TTY error path. This network-dependent regression runs on both CI platforms; it does not claim a live terminal/Herdr smoke test. Pi core/typebox are peer dependencies, not bundled; pinned development copies are included in the lockfile for reproducible CI without local junctions.
 
 ## Publishing
 
@@ -243,6 +243,13 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.4.2 Standalone monitor dependency fix
+
+- Install a pinned TUI runtime dependency for the standalone monitor, independent of Pi's host-provided extension peers. Fixes `ERR_MODULE_NOT_FOUND` after managed Pi installs that disable peer installation.
+- Add isolated tarball-install validation with peers disabled, module-import checks and the non-TTY CLI check to Windows/Linux package CI.
+- Require Node 22.19+ to match the monitor dependency. Config-root discovery is unchanged by this patch.
+- Upgrade the npm package, reload Pi sessions, and restart an existing monitor process to load the fix.
 
 ### 0.4.1 Coordinator workspace
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripVTControlCharacters } from 'node:util';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { visibleWidth } from 'pi-intercom-tui';
 import { renderMonitor } from '../dist/monitor-view.js';
 const now = Date.parse('2026-09-26T12:00:00.000Z');
 const snapshot = () => ({ config: { agents: [

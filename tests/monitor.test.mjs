@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { visibleWidth } from 'pi-intercom-tui';
 import { createMonitor, parseMonitorRoot } from '../dist/monitor.js';
 import { renderMonitor } from '../dist/monitor-view.js';
 

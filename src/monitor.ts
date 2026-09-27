@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Key, matchesKey, ProcessTerminal, TuiAltScreen, type Component, type TUI } from '@earendil-works/pi-tui';
+import { Key, matchesKey, ProcessTerminal, TuiAltScreen, type Component, type TUI } from 'pi-intercom-tui';
 import { readObservationSnapshot, type ObservationSnapshot } from './snapshot.js';
 import { renderMonitor } from './monitor-view.js';
 

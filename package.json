@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/comput-sh/pi-intercom/issues"
   },
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A coordinator-led workspace for Pi. Delegate to workers with separate contexts, evaluate their reports, and keep the main conversation focused—with the team visible alongside it.",
   "type": "module",
   "keywords": [
@@ -33,16 +33,14 @@
     "references/implementation-blocker.md"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-tui": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.4",
-    "@earendil-works/pi-tui": "^0.84.4",
     "@types/node": "^22.0.0",
     "typebox": "1.3.7",
     "typescript": "^5.9.3"
@@ -53,6 +51,10 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test tests/core.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/linux-launcher.test.mjs tests/activity.test.mjs tests/reports.test.mjs tests/worker-status.test.mjs tests/monitor.test.mjs tests/monitor-view.test.mjs tests/monitor-launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/snapshot.test.mjs tests/snapshot-security.test.mjs tests/observability-integration.test.mjs",
     "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
-    "check:package": "npm run build && npm pack --dry-run --ignore-scripts"
+    "test:package": "node --test tests/packaged-monitor.test.mjs",
+    "check:package": "npm run build && npm pack --dry-run --ignore-scripts && npm run test:package"
+  },
+  "dependencies": {
+    "pi-intercom-tui": "npm:@earendil-works/pi-tui@0.84.4"
   }
 }
