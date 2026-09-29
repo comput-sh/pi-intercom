@@ -24,7 +24,7 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 
 > **0.4.1:** The terminal monitor replaces the browser dashboard. Public worker reports and the read-only JSON worker-status tool keep coordinator decisions separate from observed activity.
 >
-> **0.5.0:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
+> **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
 
@@ -162,7 +162,7 @@ Workers have `coordinator:false` and an existing project directory equal to root
 
 Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
-HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.0 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
+HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
 
 ```json
 {"version":1,"kind":"message","from":"sender-session-id","to":"expected-recipient-session-id","payload":{"message":"explicit message"}}
@@ -196,7 +196,7 @@ Connection is separate from historical activity and public reports. A recent mat
 
 After the user confirms the previous session is closed, call `intercom_resume_worker({ to: "Builder", confirmClosed: true })`. It launches the **same saved Pi session**, restores configured identity/responsibility, and does not automatically start an old assignment. A matching connected endpoint blocks resume. Concurrent/submitted/uncertain attempts are fenced locally until a subsequent configured worker status arrives. On uncertain launch with no status, inspect the actual worker process; only after verifying closure should you reload the coordinator and consider an explicit retry. The fence is not persistent or a cross-process uniqueness guarantee. Resume failures do not remove/replace saved identity.
 
-`intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Automatic stop/close remains disabled. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.0.
+`intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Automatic stop/close remains disabled. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.1.
 
 ### JSON worker status for agents and chat integrations
 
@@ -256,7 +256,9 @@ The workflow validates on Windows and Linux, then publishes with provenance from
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
-### 0.5.0 Retained disconnected workers
+### 0.5.1 Retained disconnected workers
+
+The 0.5.0 release did not publish to npm because an occupied-port fallback exposed duplicate listener counting in test instrumentation. 0.5.1 fixes the test hook and forces that fallback deterministically, without changing production listener behavior. The 0.5.0 tag is unchanged.
 
 - Manually closed workers remain in config and the monitor, preserving name, responsibility, session ID and directory. Disconnected rows sort last; selection follows identity.
 - Read-only, bounded loopback identity checks distinguish connection state from observed activity and public reports. Old/unsupported endpoints remain unknown; endpoint failure is not proof of process termination.

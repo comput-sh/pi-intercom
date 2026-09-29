@@ -254,7 +254,12 @@ test('coordinator startup removes legacy dashboardPort without exposing a browse
 
 test('shutdown during pending legacy migration fences the write and new monitor setup', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root), bound = [];
-  await store.initialize('adapter-coordinator', 12345);
+  // Force the supported occupied-port fallback deterministically. Counting bind
+  // attempts as listeners previously made this test flaky when 12345 was busy.
+  const occupied = new Server();
+  await new Promise((resolve, reject) => { occupied.once('error', reject); occupied.listen(0, '127.0.0.1', resolve); });
+  t.after(() => new Promise(resolve => occupied.close(resolve)));
+  await store.initialize('adapter-coordinator', occupied.address().port);
   const legacy = await store.read(); legacy.agents[0].dashboardPort = 34568;
   await writeFile(store.file, JSON.stringify(legacy));
   const originalUpdate = ConfigStore.prototype.update, originalListen = Server.prototype.listen;
@@ -269,8 +274,16 @@ test('shutdown during pending legacy migration fences the write and new monitor 
     }, guard);
   };
   Server.prototype.listen = function(...args) {
-    this.once('listening', () => { const address = this.address(); if (address && typeof address !== 'string') bound.push(address.port); });
-    return originalListen.apply(this, args);
+    const failed = () => this.off('listening', listening);
+    const listening = () => {
+      this.off('error', failed);
+      const address = this.address();
+      if (address && typeof address !== 'string') bound.push(address.port);
+    };
+    this.once('listening', listening);
+    this.once('error', failed);
+    try { return originalListen.apply(this, args); }
+    catch (error) { this.off('listening', listening); this.off('error', failed); throw error; }
   };
   let starting;
   try {

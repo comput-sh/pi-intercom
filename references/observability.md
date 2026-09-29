@@ -1,6 +1,6 @@
 # Local observations and terminal monitor
 
-Intercom's terminal monitor is a standalone Node/pi-tui process above the coordinator in Herdr. It reads local configuration and metadata logs; it is not an agent, scheduler, durable task journal, or proof of liveness. The basic monitor was included in npm release 0.4.1, replacing the browser dashboard. Connectivity checks/disconnected sorting described below are included in 0.5.0. See [README](../README.md) for installation and validation scope.
+Intercom's terminal monitor is a standalone Node/pi-tui process above the coordinator in Herdr. It reads local configuration and metadata logs; it is not an agent, scheduler, durable task journal, or proof of liveness. The basic monitor was included in npm release 0.4.1, replacing the browser dashboard. Connectivity checks/disconnected sorting described below are included in 0.5.1. See [README](../README.md) for installation and validation scope.
 
 ## Terminal-first monitoring
 
@@ -20,7 +20,7 @@ Names and descriptions are sanitized for terminal controls and clipped to availa
 
 ## Retired browser dashboard
 
-Version 0.4.1 no longer starts a dashboard HTTP server, ships browser assets, or returns `dashboardUrl` from `intercom_list`. Only Intercom's loopback agent HTTP listeners remain; 0.5.0 adds a side-effect-free health route to those existing listeners.
+Version 0.4.1 no longer starts a dashboard HTTP server, ships browser assets, or returns `dashboardUrl` from `intercom_list`. Only Intercom's loopback agent HTTP listeners remain; 0.5.1 adds a side-effect-free health route to those existing listeners.
 
 Old coordinator-only `dashboardPort` fields are accepted for compatibility and removed through a guarded coordinator config update at startup. Listing never advertises the retired port, even if migration failed; a migration warning does not disable messaging. Reload an older running coordinator to close its existing dashboard listener and load the new implementation.
 
