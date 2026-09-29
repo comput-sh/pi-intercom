@@ -3,6 +3,7 @@ import { truncateToWidth, visibleWidth } from 'pi-intercom-tui';
 import type { ObservationSnapshot } from './snapshot.js';
 import { workerObservation } from './worker-status.js';
 import { currentConnection, sortWorkersByConnection } from './connections.js';
+import { INTERCOM_VERSION } from './version.js';
 
 const safe = (value: string) => stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f-\x9f\u2028-\u202e\u2066-\u2069]/g, ' ');
 const clip = (value: string, width: number) => stripVTControlCharacters(truncateToWidth(safe(value), Math.max(0, width)));
@@ -124,7 +125,23 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
   const partial = snapshot && (snapshot.truncated || snapshot.errors.length);
   const controls = options.details ? 'q quit · Esc back · ↑↓ select' : 'q quit · ↑↓ select · Enter details';
   const hasReports = snapshot?.reports?.some(report => reportLabels[report.status] && snapshot.config?.agents.some(agent => !agent.coordinator && agent.sessionId === report.sessionId));
-  const footer = width < 18 ? 'q quit' : `  ${controls}${partial ? ' · Partial observations' : ''}${hasReports ? ' · Reports: self-reported, pending review' : ''}`;
+  const version = `v${safe(INTERCOM_VERSION)}`;
+  const fullVersion = `Intercom ${version}`;
+  const label = width >= visibleWidth(controls) + visibleWidth(fullVersion) + 4 ? fullVersion : version;
+  const room = width - visibleWidth(label) - 2;
+  let footer = width < 6 ? 'q' : 'q quit';
+  if (room >= 6) {
+    const compactControls = options.details ? 'q quit · Esc · ↑↓' : 'q quit · ↑↓ · Enter';
+    const prefix = room >= 8 ? '  ' : '';
+    const available = room - prefix.length;
+    const hint = visibleWidth(controls) <= available ? controls : visibleWidth(compactControls) <= available ? compactControls : 'q quit';
+    const caveats = `${partial ? ' · Partial observations' : ''}${hasReports ? ' · Reports: self-reported, pending review' : ''}`;
+    // Lower-priority caveats may truncate, but never consume the quit hint or
+    // the reserved version label. Keep the version flush with the right edge.
+    const left = prefix + hint + clip(caveats, Math.max(0, available - visibleWidth(hint)));
+    footer = left + ' '.repeat(Math.max(2, width - visibleWidth(left) - visibleWidth(label))) + label;
+  }
+  lines.splice(Math.max(0, height - 1));
   while (lines.length < height - 1) lines.push('');
   lines.push(dim(line(footer)));
   return lines.slice(0, height);

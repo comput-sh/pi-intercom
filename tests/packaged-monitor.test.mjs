@@ -79,6 +79,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
       assert.equal(typeof monitor.createMonitor, 'function');
       assert.equal(typeof monitor.parseMonitorRoot, 'function');
       assert.equal(typeof view.renderMonitor, 'function');
+      assert.ok(view.renderMonitor(undefined, 100, 5).at(-1).includes('Intercom v' + require('./package.json').version));
       assert.equal(monitor.parseMonitorRoot(['--root', process.cwd()]), process.cwd());
     `], temporary, 30000);
 

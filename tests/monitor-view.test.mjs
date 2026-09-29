@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { stripVTControlCharacters } from 'node:util';
 import { visibleWidth } from 'pi-intercom-tui';
 import { renderMonitor } from '../dist/monitor-view.js';
+import { INTERCOM_VERSION } from '../dist/version.js';
 const now = Date.parse('2026-09-26T12:00:00.000Z');
 const snapshot = () => ({ config: { agents: [
   { sessionId: 'a', name: 'Builder', coordinator: false },
@@ -103,7 +104,9 @@ test('short report panes prioritize summary and usable footer controls', () => {
     assert.ok(narrow.every(line => visibleWidth(line) <= width));
   }
   s.truncated = true;
-  assert.match(renderMonitor(s, 40, 8, now).at(-1), /q quit.*Enter details/);
+  const footer = renderMonitor(s, 40, 8, now).at(-1);
+  assert.match(footer, /q quit.*Enter/);
+  assert.ok(footer.endsWith(`v${INTERCOM_VERSION}`));
 });
 
 test('report summaries wrap safely within selection and detail geometry', () => {
@@ -126,6 +129,32 @@ test('report summaries wrap safely within selection and detail geometry', () => 
 test('equal-time contradictory observations remain unknown', () => {
   const s = snapshot(); s.events.push({...s.events[0], busy: false});
   assert.match(renderMonitor(s, 100, 10, now).join('\n'), /Builder\s+unknown\s+—\s+unknown\s+3s ago.*conflicting records/);
+});
+
+test('footer reserves a right-aligned runtime version with safe tiny-pane quit hints', () => {
+  const version = `v${INTERCOM_VERSION}`;
+  for (const s of [undefined, snapshot(), { ...snapshot(), truncated: true, reports: [report('blocked')] }]) {
+    for (const details of [false, true]) for (const width of [1, 3, 5, 6, 10, 14, 20, 30, 40, 60, 100, 140]) {
+      for (const height of [1, 2, 3, 8, 20]) {
+        const plain = renderMonitor(s, width, height, now, false, { selectedIndex: 0, details });
+        const styled = renderMonitor(s, width, height, now, true, { selectedIndex: 0, details });
+        assert.deepEqual(styled.map(stripVTControlCharacters), plain);
+        assert.equal(plain.length, height);
+        assert.ok(plain.every(line => visibleWidth(line) <= width));
+        assert.doesNotMatch(plain.join(''), /[\x00-\x1f\x7f-\x9f]/);
+        const footer = plain.at(-1);
+        assert.ok(footer.includes(width < 6 ? 'q' : 'q quit'));
+        if (width >= visibleWidth(version) + 8) {
+          assert.ok(footer.endsWith(version));
+          assert.equal(visibleWidth(footer), width);
+        }
+        if (width >= 60) assert.ok(footer.endsWith(`Intercom ${version}`));
+        if (width <= 40) assert.ok(!footer.includes('Intercom'));
+      }
+    }
+  }
+  assert.deepEqual(renderMonitor(undefined, 0, 1, now), []);
+  assert.deepEqual(renderMonitor(undefined, 40, 0, now), []);
 });
 
 test('disconnected workers stay visible at bottom with active reports and independent activity', () => {
