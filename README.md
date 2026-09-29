@@ -23,6 +23,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 **Intercom communicates; Pi orchestrates.** It is a local coordination layer, not an autonomous scheduler or a task-completion guarantee.
 
 > **0.4.1:** The terminal monitor replaces the browser dashboard. Public worker reports and the read-only JSON worker-status tool keep coordinator decisions separate from observed activity.
+>
+> **0.5.0:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
 
@@ -122,12 +124,12 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
-| `intercom_worker_status` | `name?`, `offset?`, `limit?` | Configured sessions; bounded JSON observations/public reports, no live probing |
+| `intercom_worker_status` | `name?`, `offset?`, `limit?`, `probe?` | Configured sessions; local JSON by default, optional bounded endpoint checks for returned page |
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
 | `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator, never approve/complete work |
 | `intercom_stop_worker`, `intercom_close_worker` | `to` (worker name) | Coordinator role checked, then **unsupported-host error**, no side effects |
-| `intercom_resume_worker` | `to` (worker name) | Coordinator; saved session, configured launcher/directory |
+| `intercom_resume_worker` | `to`, `confirmClosed` | Coordinator; user-confirmed old-session closure, saved session/launcher/directory, guarded launch |
 | `intercom_remove_worker` | `to` (worker name) | Coordinator; config entry only, no shutdown/session deletion |
 | `intercom_set_multiplexer` | `multiplexer`: `herdr` or `none` | Coordinator; future launches only |
 
@@ -160,7 +162,7 @@ Workers have `coordinator:false` and an existing project directory equal to root
 
 Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
-HTTP binds **127.0.0.1 only**, `POST /intercom`, UTF-8 JSON, at most 64 KiB. Envelope:
+HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.0 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
 
 ```json
 {"version":1,"kind":"message","from":"sender-session-id","to":"expected-recipient-session-id","payload":{"message":"explicit message"}}
@@ -178,7 +180,7 @@ Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains 
 
 The coordinator automatically checks for its monitor pane on startup inside Herdr. If missing, it creates a small pane **above the coordinator**, preserving coordinator focus. This is a standalone Node/pi-tui program, **not another Pi instance**. The old inline widget implementation has been removed. Source installations must run `npm run build` before reloading Pi; published packages include the compiled `dist/monitor.js` entry.
 
-The table uses aligned **Worker | Seen | Status | Report | Last activity** columns (activity detail gives way first on narrow panes). Report is explicitly worker-authored and separate from host activity. Status is the last reported `working`, `thinking`, `idle`, `closed`, or `unknown` state. Seen marks evidence older than 60 seconds with `(old)`; this is not a live connection indicator. Last activity uses fixed public labels such as Reading files, Running command or Writing response and can persist after the worker settles. Recent working/thinking/idle observations use restrained colors; old evidence remains neutral and explicitly marked. `NO_COLOR` disables styling. No read-only banner or busy/idle count summary is shown. It passively reads the same bounded config/log snapshot as the web dashboard about every three seconds, without worker prompts, probing or model calls. Only observed activity is shown, not inferred assignments/completion. Evidence over 60 seconds old is stale; missing evidence is unknown. The number of worker rows adapts to the pane height, with an omitted count when needed. The display is clipped to pane dimensions. In the monitor pane, use **↑/↓** to select a worker and **Enter** to toggle its details (configured responsibility and observed status). Selection follows the worker across roster reorder and scrolls the visible window. **Escape** closes details first, then quits; **q** or **Ctrl+C** always quits only the display process, never agents or their panes.
+The table uses aligned **Worker | Connection | Report | Activity | Seen | Last activity** columns (activity age/detail give way first on narrow panes). Report is explicitly worker-authored and separate from host activity. Activity is the last reported `working`, `thinking`, `idle`, `closed`, or `unknown` state. Seen marks evidence older than 60 seconds with `(old)`; this is not a live connection indicator. Last activity uses fixed public labels such as Reading files, Running command or Writing response and can persist after the worker settles. Recent working/thinking/idle observations use restrained colors; old evidence remains neutral and explicitly marked. `NO_COLOR` disables styling. No read-only banner or busy/idle count summary is shown. It reads the bounded config/log snapshot and performs read-only loopback health checks, then refreshes roughly three seconds after completion, without worker prompts or model calls. Checks are bounded by 750 ms per endpoint, a four-second batch budget, 16 concurrent requests and 256 workers; no overlapping batches or retries. Closing the monitor aborts checks. Only observed activity is shown, not inferred assignments/completion. Evidence over 60 seconds old is stale; missing evidence is unknown. The number of worker rows adapts to the pane height, with an omitted count when needed. The display is clipped to pane dimensions. In the monitor pane, use **↑/↓** to select a worker and **Enter** to toggle its details (configured responsibility and observed status). Selection follows the worker across roster reorder and scrolls the visible window. **Escape** closes details first, then quits; **q** or **Ctrl+C** always quits only the display process, never agents or their panes.
 
 Detailed phase reports require reloading participating Pi sessions. `thinking` is emitted only when the provider supplies thinking events; missing thinking events do not imply that no reasoning occurred. Streaming content, reasoning text, command arguments and tool outputs are never read or logged for status. Repeated streaming events are deduplicated; concurrent tools are tracked without recording their arguments. Legacy busy observations display as working without invented detail. No task completion is inferred from settlement.
 
@@ -186,11 +188,21 @@ The pane's display name is simply `Intercom monitor`. Ownership uses saved pane/
 
 Outside Herdr, messaging continues without a status pane. The browser dashboard is retired; no dashboard listener or browser assets are started/shipped in 0.4.1. A monitor or legacy-metadata cleanup failure does not disable messaging. Reload an older running coordinator to close its former dashboard listener. These features replace the browser dashboard from 0.3.0.
 
+### Keeping a worker for later
+
+Close the worker's Pi session manually **without removing its registration**. Its name, responsibility, session ID, directory and last saved endpoint remain in config; its Pi session history remains in Pi storage. The monitor keeps its row visible and sorts disconnected workers last, preserving saved order within each group and selection by session ID. This is a derived connection state, not a config deletion or a hidden row.
+
+Connection is separate from historical activity and public reports. A recent matching health response means connected. Refused connections, timeouts or a mismatched session ID mean the saved worker endpoint is unreachable/unmatched—not proof the process is stopped. Old versions without health support, malformed responses, unsupported protocols and skipped checks remain unknown. Checks older than 30 seconds expire to unknown. Details show check time/reason; cached checks are discarded when a saved port changes or a worker is removed.
+
+After the user confirms the previous session is closed, call `intercom_resume_worker({ to: "Builder", confirmClosed: true })`. It launches the **same saved Pi session**, restores configured identity/responsibility, and does not automatically start an old assignment. A matching connected endpoint blocks resume. Concurrent/submitted/uncertain attempts are fenced locally until a subsequent configured worker status arrives. On uncertain launch with no status, inspect the actual worker process; only after verifying closure should you reload the coordinator and consider an explicit retry. The fence is not persistent or a cross-process uniqueness guarantee. Resume failures do not remove/replace saved identity.
+
+`intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Automatic stop/close remains disabled. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.0.
+
 ### JSON worker status for agents and chat integrations
 
 `intercom_worker_status({})` returns a bounded JSON page of configured workers, or use `{ name: "Builder" }` for one worker. Each entry includes `observedStatus`, `lastActivity`, `observedAt`, `observationAgeSeconds`, `stale`, `evidence`, and an optional public `report` with its independent timestamp/age. Unknown ages/staleness are `null`; conflicting/future observations remain unknown, not healthy. A null report means no readable active report, not proof there are no blockers.
 
-The tool uses the **same observation interpretation as the terminal monitor**, reads local files only, and never prompts/probes workers. It has no Telegram dependency: an agent can read the JSON and use its existing chat tools to present a summary. `intercom_list` remains saved configuration; `intercom_request_status` remains an explicit asynchronous live status request.
+The tool uses the **same observation interpretation as the terminal monitor** and reads local files only by default. Set `probe: true` to check the selected page's saved worker endpoints through the read-only health endpoint. No model turn or worker message is submitted. Results contain a separate `connection` object (`state`, `reason`, `checkedAt`); without probes it is unknown/not_checked. Disconnected entries sort last within each returned page; page boundaries stay in saved roster order, not a globally connectivity-sorted roster. It has no Telegram dependency: an agent can read the JSON and use its existing chat tools to present a summary. `intercom_list` remains saved configuration; `intercom_request_status` remains an explicit asynchronous live status request.
 
 Results include `errors`, `truncated`, `totalInSnapshot`, and `nextOffset`. Use `{ offset: nextOffset }` until it is null. Default page size is 10; `limit` accepts 1–20, with an additional byte budget to keep JSON complete. The snapshot retains at most 256 configured agents; truncation and unavailable observations are explicit. No result is proof of current liveness, coordinator approval, or task completion.
 
@@ -243,6 +255,15 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.5.0 Retained disconnected workers
+
+- Manually closed workers remain in config and the monitor, preserving name, responsibility, session ID and directory. Disconnected rows sort last; selection follows identity.
+- Read-only, bounded loopback identity checks distinguish connection state from observed activity and public reports. Old/unsupported endpoints remain unknown; endpoint failure is not proof of process termination.
+- `intercom_worker_status` remains local-only by default; `probe:true` adds connection checks for the selected page.
+- **Resume API change:** `intercom_resume_worker` requires `confirmClosed:true` after explicit user confirmation that the previous session was closed. Matching connected endpoints block resume; concurrent/uncertain attempts are fenced locally. No automatic shutdown, removal, restart or assignment.
+- Reload coordinator/workers and restart the monitor after upgrading. Config-root discovery is unchanged.
+- Local validation: typecheck, 132 tests and isolated package-install check passed; independent source review found no remaining critical blocker in reviewed paths. Native Windows/Linux CI gates publication.
 
 ### 0.4.2 Standalone monitor dependency fix
 

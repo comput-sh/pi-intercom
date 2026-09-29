@@ -96,6 +96,29 @@ test('real HTTP runtime reuses saved port and reports occupied-port fallback wit
   assert.match(fallback.messages.at(-1).text, /Use refreshed endpoint/);
 });
 
+test('explicit health checks preserve saved workers and do not deliver messages or write config', async t => {
+  const f = await fixture(t), c = await f.start('coordinator'), a = await f.start('worker-a');
+  await f.configure(c, a, 'worker-a', 'Alpha');
+  const before = await c.runtime.store.read(), count = c.messages.length, workerCount = a.messages.length;
+  const local = await c.runtime.tool('worker_status', { name: 'Alpha' });
+  assert.equal(local.workers[0].connection.state, 'unknown');
+  const live = await c.runtime.tool('worker_status', { name: 'Alpha', probe: true });
+  assert.equal(live.workers[0].connection.state, 'connected');
+  assert.equal(c.messages.length, count); assert.equal(a.messages.length, workerCount);
+  assert.deepEqual(await c.runtime.store.read(), before);
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Alpha', confirmClosed: true }), /still connected/);
+  await a.runtime.close();
+  const disconnected = await c.runtime.tool('worker_status', { name: 'Alpha', probe: true });
+  assert.equal(disconnected.workers[0].connection.state, 'disconnected');
+  assert.deepEqual(await c.runtime.store.read(), before);
+  const resumed = await f.start('worker-a');
+  assert.equal(resumed.runtime.responsibility.name, 'Alpha');
+  assert.equal(resumed.runtime.responsibility.description, 'Alpha assigned remit');
+  assert.equal(resumed.messages.length, 0);
+  const back = await c.runtime.tool('worker_status', { name: 'Alpha', probe: true });
+  assert.equal(back.workers[0].connection.state, 'connected');
+});
+
 test('real HTTP coordinator loss leaves workers reachable for peer communication', async t => {
   const f = await fixture(t), c = await f.start('coordinator'), a = await f.start('worker-a'), b = await f.start('worker-b');
   await f.configure(c, a, 'worker-a', 'Alpha'); await f.configure(c, b, 'worker-b', 'Beta');

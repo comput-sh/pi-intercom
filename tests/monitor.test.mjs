@@ -11,11 +11,11 @@ const snapshot = () => ({ version: 1, generatedAt: new Date(now).toISOString(), 
   events: [{ sessionId: 'w', event: 'host.activity', busy: true, timestamp: new Date(now - 70000).toISOString() }],
   errors: [], truncated: false });
 const settle = () => new Promise(resolve => setImmediate(resolve));
-function harness(read) {
+function harness(read, extra = {}) {
   let rows = 8, renders = 0, quits = 0;
   const pending = new Set();
   const monitor = createMonitor('/unused', {
-    read, rows: () => rows, now: () => now, color: false,
+    ...extra, read, rows: () => rows, now: extra.now ?? (() => now), color: false,
     requestRender: () => { renders++; }, onQuit: () => { quits++; },
     schedule(callback, delay) {
       assert.equal(delay, 3000);
@@ -138,5 +138,100 @@ test('render honors current height and width on every frame, including tiny pane
       }
     }
   }
+  h.monitor.close();
+});
+
+const connection = (sessionId, state, reason = state === 'connected' ? 'verified' : 'refused', checkedAt = now) => ({
+  sessionId, state, reason, checkedAt: checkedAt === null ? null : new Date(checkedAt).toISOString(),
+});
+test('explicit probes are nonoverlapping and aborted on close without late render', async () => {
+  let resolve, signal, calls = 0;
+  const h = harness(async () => snapshot(), { probe: async (_workers, options) => {
+    calls++; signal = options.signal;
+    return new Promise(r => { resolve = r; });
+  } });
+  h.monitor.start(); await settle(); h.tick();
+  assert.equal(calls, 1); assert.equal(h.renders, 0); assert.equal(h.pending.size, 0);
+  h.monitor.handleInput('q'); assert.equal(signal.aborted, true);
+  resolve([connection('w', 'disconnected')]); await settle();
+  assert.equal(h.renders, 0); assert.equal(h.pending.size, 0);
+});
+test('connectivity sorting preserves selected identity in details and when checks expire', async () => {
+  const s = snapshot();
+  s.config.agents.push({ sessionId: 'b', name: 'Second', description: 'Second responsibility' });
+  let time = now;
+  const h = harness(async () => s, { now: () => time });
+  h.setRows(20); h.monitor.start(); await settle(); h.monitor.handleInput('\r');
+  s.connections = [connection('w', 'disconnected'), connection('b', 'connected')];
+  h.tick(); await settle();
+  let lines = h.monitor.render(140);
+  assert.ok(lines.findIndex(line => line.includes('Second')) < lines.findIndex(line => line.includes('Worker宽')));
+  assert.match(lines.join('\n'), /› Worker宽.*disconnected/);
+  assert.match(lines.join('\n'), /Responsibility: Review only/);
+  time += 31000;
+  lines = h.monitor.render(140);
+  assert.match(lines.join('\n'), /› Worker宽.*unknown/);
+  h.monitor.handleInput('\x1b[B');
+  assert.match(h.monitor.render(140).join('\n'), /› Second.*unknown/);
+  h.monitor.close();
+});
+test('rotated bounded probes retain not_checked evidence, then expire it truthfully', async () => {
+  const s = snapshot();
+  s.config.agents = Array.from({ length: 300 }, (_, i) => ({ sessionId: `w${i}`, name: `Worker-${i}`, port: 10000 + i }));
+  const starts = []; let time = now;
+  const h = harness(async () => s, { now: () => time, probe: async workers => {
+    assert.equal(workers.length, 256); starts.push(workers[0].sessionId);
+    return workers.map((worker, i) => i === 0
+      ? connection(worker.sessionId, 'disconnected', 'refused', time)
+      : connection(worker.sessionId, 'unknown', 'not_checked', null));
+  } });
+  h.setRows(310); h.monitor.start(); await settle(); h.tick(); await settle();
+  assert.deepEqual(starts, ['w0', 'w1']);
+  // w1 was previously not checked, and w0 is outside this rotated slice.
+  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+disconnected/);
+  time += 31000;
+  assert.match(h.monitor.render(140).join('\n'), /Worker-0\s+unknown/);
+  h.monitor.close();
+});
+test('saved endpoint changes and removal invalidate cached checks without losing selection', async () => {
+  let s = snapshot(), calls = 0;
+  s.config.agents[0].port = 12000;
+  s.config.agents.push({ sessionId: 'b', name: 'Second', port: 12001 });
+  const h = harness(async () => s, { probe: async workers => {
+    calls++;
+    return workers.map(worker => calls === 1 || calls === 3
+      ? connection(worker.sessionId, worker.sessionId === 'w' ? 'disconnected' : 'connected')
+      : connection(worker.sessionId, 'unknown', 'not_checked', null));
+  } });
+  h.setRows(20); h.monitor.start(); await settle();
+  // Sorted first roster selects Second; explicitly select the disconnected worker.
+  h.monitor.handleInput('\x1b[B'); h.monitor.handleInput('\r');
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+disconnected/);
+  s = { ...s, config: { ...s.config, agents: s.config.agents.map(worker => worker.sessionId === 'w' ? { ...worker, port: 12002 } : worker) } };
+  h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /Checked: never/);
+  assert.match(h.monitor.render(140).join('\n'), /Responsibility: Review only/);
+  h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /› Worker宽\s+disconnected/);
+  const saved = s.config.agents[0];
+  s = { ...s, config: { ...s.config, agents: s.config.agents.slice(1) } };
+  h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /› Second\s+connected/);
+  s = { ...s, config: { ...s.config, agents: [saved, ...s.config.agents] } };
+  h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+unknown/);
+  assert.match(h.monitor.render(140).join('\n'), /› Second\s+connected/);
+  h.monitor.close();
+});
+test('not_checked result does not overwrite a prior verified check', async () => {
+  let calls = 0, time = now;
+  const h = harness(async () => snapshot(), { now: () => time, probe: async () => ++calls === 1
+    ? [connection('w', 'disconnected')]
+    : [connection('w', 'unknown', 'not_checked', null)] });
+  h.monitor.start(); await settle(); h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+disconnected/);
+  time += 31000; h.tick(); await settle();
+  assert.match(h.monitor.render(140).join('\n'), /Worker宽\s+unknown/);
   h.monitor.close();
 });

@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { truncateToWidth, visibleWidth } from 'pi-intercom-tui';
 import type { ObservationSnapshot } from './snapshot.js';
 import { workerObservation } from './worker-status.js';
+import { currentConnection, sortWorkersByConnection } from './connections.js';
 
 const safe = (value: string) => stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f-\x9f\u2028-\u202e\u2066-\u2069]/g, ' ');
 const clip = (value: string, width: number) => stripVTControlCharacters(truncateToWidth(safe(value), Math.max(0, width)));
@@ -50,29 +51,29 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
   if (!snapshot?.config) {
     lines.push(paint('33', line('  Status unavailable — waiting for local observations')));
   } else {
-    const workers = snapshot.config.agents.filter(agent => !agent.coordinator);
-    // Report remains distinct from observed status; last activity gives way first.
+    const workers = sortWorkersByConnection(snapshot.config.agents.filter(agent => !agent.coordinator), snapshot.connections, now);
+    // Connection is independent of historical activity and public reports.
     const wide = width >= 100;
-    const nameWidth = wide ? Math.min(22, Math.max(10, width - 88)) : 10;
-    const activityWidth = wide ? 12 : 8, ageWidth = 16, reportWidth = 16;
-    const table = (name: string, activity: string, age: string, detail: string, report = '—', tone = '90', selected = false) => {
-      const prefix = `${selected ? '› ' : '  '}${cell(name, nameWidth)}  ${cell(age, ageWidth)}  `;
-      const status = cell(activity, activityWidth);
-      const tail = `  ${cell(report, reportWidth)}${wide ? `  ${detail}` : ''}`;
-      // Clip as plain text first; no untrusted escape sequences enter the output.
-      if (!color) return line(prefix + status + tail);
+    const nameWidth = wide ? Math.min(22, Math.max(10, width - 100)) : Math.max(1, Math.min(10, width - 16));
+    const activityWidth = 8, ageWidth = 16, reportWidth = 16;
+    const table = (name: string, connection: string, activity: string, age: string, detail: string, report = '—', tone = '90', selected = false) => {
+      const prefix = `${selected ? '› ' : '  '}${cell(name, nameWidth)}  `;
+      const status = cell(connection, 12);
+      const tail = `  ${cell(report, reportWidth)}  ${cell(activity, activityWidth)}${width >= 78 ? `  ${cell(age, ageWidth)}` : ''}${wide ? `  ${detail}` : ''}`;
+      // Clip each lower-priority section independently so a truncated tail never
+      // steals space from a fully fitting connection label. Styling is trusted.
       const namePart = clip(prefix, width);
       const statusRoom = Math.max(0, width - visibleWidth(namePart));
       const statusPart = clip(status, statusRoom);
       const tailRoom = Math.max(0, statusRoom - visibleWidth(statusPart));
       return (selected ? paint('1;36', namePart) : namePart) + paint(tone, statusPart) + dim(clip(tail, tailRoom));
     };
-    lines.push(paint('1', table('Worker', 'Status', 'Seen', 'Last activity', 'Report')));
+    lines.push(paint('1', table('Worker', 'Connection', 'Activity', 'Seen', 'Last activity', 'Report')));
     lines.push(dim(line('  ' + '─'.repeat(Math.max(0, width - 2)))));
     const selectedIndex = Math.min(workers.length - 1, Math.max(-1, options.selectedIndex ?? -1));
     const showDetails = Boolean(options.details && selectedIndex >= 0 && height >= 8);
     const selectedReport = snapshot.reports?.find(report => report.sessionId === workers[selectedIndex]?.sessionId && reportLabels[report.status]);
-    const detailBudget = showDetails ? Math.min(selectedReport ? 12 : 5, height - 5) : 0;
+    const detailBudget = showDetails ? Math.min(selectedReport ? 15 : 8, height - 5) : 0;
     const available = Math.max(0, height - lines.length - 2 - detailBudget);
     const needsOverflow = workers.length > available;
     const count = Math.min(workers.length, Math.max(0, available - (needsOverflow && available > 1 ? 1 : 0)));
@@ -82,17 +83,25 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
       const observation = workerObservation(snapshot, worker.sessionId, now);
       const activity = observation.observedStatus, evidence = observation.lastActivity;
       const age = observation.observationAgeSeconds === null ? '—' : ageLabel(observation.observationAgeSeconds * 1000) + (observation.stale ? ' (old)' : '');
-      const tone = observation.stale ? '90' : activity === 'thinking' ? '35' : activity === 'working' ? '36' : activity === 'idle' ? '32' : '90';
+      const connection = currentConnection(worker.sessionId, snapshot.connections, now);
+      const tone = connection.state === 'disconnected' ? '33' : connection.state === 'connected' ? '32' : '90';
+      const checkedAge = connection.checkedAt ? now - Date.parse(connection.checkedAt) : NaN;
+      const connectionDetails = [
+        line(`  Connection: ${connection.state} · ${connection.reason}`),
+        line(`  Checked: ${connection.checkedAt ?? 'never'} · ${Number.isFinite(checkedAge) && checkedAge >= 0 ? ageLabel(checkedAge) : 'age unknown'}`),
+      ];
       const selected = start + offset === selectedIndex;
       const report = snapshot.reports?.find(report => report.sessionId === worker.sessionId && reportLabels[report.status]);
-      lines.push(table(worker.name, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected));
+      lines.push(table(worker.name, connection.state, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected));
       if (selected && showDetails && report) {
         const elapsed = now - Date.parse(report.updatedAt);
         const reportAge = !Number.isFinite(elapsed) || elapsed < 0 ? 'clock uncertain' : ageLabel(elapsed) + (elapsed > snapshot.staleAfterMs ? ' (old)' : '');
-        const contextRows = detailBudget >= 5 ? [
-          ...(detailBudget >= 6 ? [paint('1', line(`  ${worker.name}`))] : []),
+        const contextRows = detailBudget >= 8 ? [
+          paint('1', line(`  ${worker.name}`)),
+          ...connectionDetails,
           line(`  Responsibility: ${worker.description || 'Not specified'}`),
           line(`  Observed status: ${activity} · ${age}`),
+          ...(detailBudget >= 10 ? [line(`  Last activity: ${evidence}`)] : []),
         ] : [];
         selectedDetail = [
           ...contextRows,
@@ -101,15 +110,14 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
           ...wrapSummary(`Summary: ${report.summary}`, Math.max(0, width - 2), Math.max(0, detailBudget - 2 - contextRows.length)).map(text => line(`  ${text}`)),
         ];
       } else if (selected && showDetails) selectedDetail = [
-        dim(line('  ' + '─'.repeat(Math.max(0, width - 2)))),
-        paint('1', line(`  ${worker.name}`)),
+        ...connectionDetails,
         line(`  Responsibility: ${worker.description || 'Not specified'}`),
         line(`  Observed status: ${activity} · ${age}`),
         line(`  Last activity: ${evidence}`),
       ];
     }
     if (workers.length > count && available > count) lines.push(dim(line(`  ${workers.length - count} more · rows ${count ? start + 1 : 0}–${start + count} of ${workers.length} · ↑↓ to browse`)));
-    lines.push(...(selectedReport ? selectedDetail.slice(0, detailBudget) : selectedDetail.slice(-detailBudget || selectedDetail.length)));
+    lines.push(...selectedDetail.slice(0, detailBudget));
     if (!workers.length && available) lines.push(dim(line('  No workers configured yet')));
   }
   // Anchor the hint at the bottom; do not fill the pane with decorative boxes.

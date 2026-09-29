@@ -3,6 +3,7 @@ import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { validateConfig, type Config } from './config.js';
 import { readWorkerReports, type WorkerReport } from './reports.js';
+import type { WorkerConnection } from './connections.js';
 import { LOG_DIRECTORY, LOG_FILE_PATTERN, sanitizeObservation, type Observation } from './observability.js';
 
 const CONFIG_BYTES = 1024 * 1024, TAIL_BYTES = 128 * 1024, TOTAL_BYTES = 2 * 1024 * 1024;
@@ -14,6 +15,8 @@ export interface ObservationSnapshot {
   config: Pick<Config, 'multiplexer' | 'agents'> | null;
   events: Observation[];
   reports?: WorkerReport[];
+  /** Ephemeral explicit health checks; never persisted or inferred from activity logs. */
+  connections?: WorkerConnection[];
   truncated: boolean;
   errors: string[];
 }

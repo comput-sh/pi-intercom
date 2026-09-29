@@ -14,15 +14,16 @@ const snapshot = () => ({ config: { agents: [
 
 test('table-first layout separates activity from freshness and removes banners/count summaries', () => {
   const lines = renderMonitor(snapshot(), 100, 12, now);
-  assert.match(lines[0], /Worker\s+Seen\s+Status\s+Report\s+Last activity/);
-  assert.match(lines.join('\n'), /Reviewer\s+2m ago \(old\)\s+idle/);
+  assert.match(lines[0], /Worker\s+Connection\s+Report\s+Activity\s+Seen\s+Last activity/);
+  assert.match(lines.join('\n'), /Reviewer\s+unknown\s+—\s+idle\s+2m ago \(old\)/);
   assert.doesNotMatch(lines.join('\n'), /Read-only|INTERCOM|1 busy|1 idle/);
   assert.equal(lines.length, 12);
   assert.match(lines.at(-1), /q quit/);
 });
-test('narrow layout retains old-observation warning; taller panes display more than five workers', () => {
+test('narrow layout prioritizes connectivity; taller panes display more than five workers', () => {
   const s = snapshot();
-  assert.match(renderMonitor(s, 60, 10, now).join('\n'), /2m ago \(old\)/);
+  assert.match(renderMonitor(s, 60, 10, now).join('\n'), /Reviewer\s+unknown/);
+  assert.match(renderMonitor(s, 80, 10, now).join('\n'), /2m ago \(old\)/);
   s.config.agents = Array.from({length: 12}, (_, i) => ({ sessionId: `w${i}`, name: `Worker-${i}` }));
   assert.match(renderMonitor(s, 100, 20, now).join('\n'), /Worker-11/);
   assert.match(renderMonitor(s, 100, 8, now).join('\n'), /more/);
@@ -30,9 +31,9 @@ test('narrow layout retains old-observation warning; taller panes display more t
 test('thinking uses explicit phase and settled status retains historical activity', () => {
   const s = snapshot();
   s.events[0].phase = 'thinking'; s.events[0].detail = 'thinking';
-  assert.match(renderMonitor(s, 110, 12, now).join('\n'), /Builder\s+3s ago\s+thinking\s+—\s+Thinking/);
+  assert.match(renderMonitor(s, 110, 12, now).join('\n'), /Builder\s+unknown\s+—\s+thinking\s+3s ago\s+Thinking/);
   s.events.push({ ...s.events[0], timestamp: new Date(now - 1000).toISOString(), phase: 'idle', detail: 'settled', busy: false });
-  assert.match(renderMonitor(s, 110, 12, now).join('\n'), /Builder\s+1s ago\s+idle\s+—\s+Thinking/);
+  assert.match(renderMonitor(s, 110, 12, now).join('\n'), /Builder\s+unknown\s+—\s+idle\s+1s ago\s+Thinking/);
 });
 test('selection scrolls into view and details remain bounded and terminal-safe', () => {
   const s = snapshot();
@@ -66,8 +67,8 @@ test('public reports are distinct from observed activity and explicitly pending 
   for (const [status, label] of [['blocked', 'Blocked'], ['needs_decision', 'Needs decision'], ['ready_for_review', 'Ready for review']]) {
     const s = snapshot(); s.reports = [report(status)];
     const lines = renderMonitor(s, 140, 16, now, false, { selectedIndex: 0, details: true });
-    assert.match(lines[0], /Status\s+Report\s+Last activity/);
-    assert.match(lines[2], new RegExp(`Builder\\s+3s ago\\s+working\\s+${label}`));
+    assert.match(lines[0], /Connection\s+Report\s+Activity\s+Seen\s+Last activity/);
+    assert.match(lines[2], new RegExp(`Builder\\s+unknown\\s+${label}\\s+working\\s+3s ago`));
     assert.match(lines.join('\n'), /self-reported, pending review/);
     assert.match(lines.join('\n'), /Summary: Please review this public result/);
     assert.doesNotMatch(lines.join('\n'), /approved|accepted|completed/i);
@@ -124,5 +125,32 @@ test('report summaries wrap safely within selection and detail geometry', () => 
 
 test('equal-time contradictory observations remain unknown', () => {
   const s = snapshot(); s.events.push({...s.events[0], busy: false});
-  assert.match(renderMonitor(s, 100, 10, now).join('\n'), /Builder\s+3s ago\s+unknown.*conflicting records/);
+  assert.match(renderMonitor(s, 100, 10, now).join('\n'), /Builder\s+unknown\s+—\s+unknown\s+3s ago.*conflicting records/);
+});
+
+test('disconnected workers stay visible at bottom with active reports and independent activity', () => {
+  const s = snapshot();
+  s.connections = [
+    { sessionId: 'a', state: 'disconnected', reason: 'refused', checkedAt: new Date(now - 2000).toISOString() },
+    { sessionId: 'b', state: 'unknown', reason: 'legacy', checkedAt: new Date(now - 1000).toISOString() },
+  ];
+  s.reports = [report('blocked', 'Still awaiting owner')];
+  const lines = renderMonitor(s, 140, 22, now, false, { selectedIndex: 1, details: true });
+  assert.match(lines[2], /Reviewer\s+unknown/);
+  assert.match(lines[3], /› Builder\s+disconnected\s+Blocked\s+working/);
+  assert.match(lines.join('\n'), /Connection: disconnected · refused/);
+  assert.match(lines.join('\n'), /Checked: 2026-09-26T11:59:58.000Z · 2s ago/);
+  assert.match(lines.join('\n'), /Observed status: working · 3s ago/);
+  assert.match(lines.join('\n'), /Report: Blocked · 3s ago/);
+  assert.match(lines.join('\n'), /Summary: Still awaiting owner/);
+  assert.doesNotMatch(lines.join('\n'), /stopped|completed|approved/i);
+  for (const width of [27, 30, 40, 60]) {
+    const narrow = renderMonitor(s, width, 10, now);
+    assert.match(narrow[3], /disconnected/);
+    assert.match(narrow.at(-1), /q quit/);
+    assert.ok(narrow.every(line => visibleWidth(line) <= width));
+  }
+  const stale = renderMonitor(s, 140, 12, now + 31000);
+  assert.match(stale[2], /Builder\s+unknown/);
+  assert.doesNotMatch(stale.join('\n'), /disconnected/);
 });

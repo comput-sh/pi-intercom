@@ -1,16 +1,17 @@
 # Local observations and terminal monitor
 
-Intercom's terminal monitor is a standalone Node/pi-tui process above the coordinator in Herdr. It reads local configuration and metadata logs; it is not an agent, scheduler, durable task journal, or proof of liveness. Included in npm release 0.4.1, replacing the browser dashboard. See [README](../README.md) for installation and validation scope.
+Intercom's terminal monitor is a standalone Node/pi-tui process above the coordinator in Herdr. It reads local configuration and metadata logs; it is not an agent, scheduler, durable task journal, or proof of liveness. The basic monitor was included in npm release 0.4.1, replacing the browser dashboard. Connectivity checks/disconnected sorting described below are included in 0.5.0. See [README](../README.md) for installation and validation scope.
 
 ## Terminal-first monitoring
 
 Coordinator startup checks its saved monitor ownership and either preserves the existing pane or creates one above the coordinator. Workers do not create monitors. The pane is named `Intercom monitor`; its generic label alone is not proof of ownership. Machine-local `monitor-*.json` files record the coordinator/workspace/pane identities and partial-launch state. Uncertain operations are fenced rather than blindly repeated.
 
-The monitor refreshes from disk approximately every three seconds after the previous read finishes. It never probes workers, launches model turns, or resends messages. Arrow keys select a worker; Enter toggles its details; Escape closes details before quitting, while q/Ctrl+C always quit the monitor only. Selection follows the worker's session ID across roster reorder. Details show configured responsibility, observations and explicit public worker reports, not inferred task state or approval controls.
+The monitor refreshes from disk and performs bounded loopback identity checks, then schedules the next pass approximately three seconds after completion. It never launches model turns or resends messages. Probes do not write config or observation logs; cancelling the monitor aborts in-flight probes. Arrow keys select a worker; Enter toggles its details; Escape closes details before quitting, while q/Ctrl+C always quit the monitor only. Selection follows the worker's session ID across roster reorder. Details show configured responsibility, observations and explicit public worker reports, not inferred task state or approval controls.
 
 - **Worker:** configured name. A roster entry does not prove a process exists.
 - **Seen:** age of the status observation, not the last redraw. Evidence older than 60 seconds is marked `(old)`.
-- **Status:** last observed working, thinking, idle, closed or unknown. Closed means extension runtime closure, not guaranteed process death. Idle is not a task-completion assertion.
+- **Connection:** connected, disconnected or unknown, separate from activity. Details show fixed reason/check time. Disconnected workers sort last; names, responsibilities and session IDs remain registered.
+- **Activity:** last observed working, thinking, idle, closed or unknown. Closed means extension runtime closure, not guaranteed process death. Idle is not a task-completion assertion.
 - **Last activity:** a fixed public description of observed activity, which may remain after settlement. No reasoning or tool payload is displayed.
 - **Report:** explicitly worker-authored blocked, needs-decision or ready-for-review state, with its own timestamp and public summary in details. It is never coordinator approval or inferred from observed activity.
 - **Unknown/partial:** missing, conflicting, future-dated or unreadable evidence is not guessed. Bounded history and dropped observations can make the view incomplete.
@@ -19,7 +20,7 @@ Names and descriptions are sanitized for terminal controls and clipped to availa
 
 ## Retired browser dashboard
 
-Version 0.4.1 no longer starts a dashboard HTTP server, ships browser assets, or returns `dashboardUrl` from `intercom_list`. Only Intercom's messaging HTTP endpoints remain.
+Version 0.4.1 no longer starts a dashboard HTTP server, ships browser assets, or returns `dashboardUrl` from `intercom_list`. Only Intercom's loopback agent HTTP listeners remain; 0.5.0 adds a side-effect-free health route to those existing listeners.
 
 Old coordinator-only `dashboardPort` fields are accepted for compatibility and removed through a guarded coordinator config update at startup. Listing never advertises the retired port, even if migration failed; a migration warning does not disable messaging. Reload an older running coordinator to close its existing dashboard listener and load the new implementation.
 
@@ -49,9 +50,19 @@ Event types: `runtime.starting`, `runtime.ready`, `runtime.closed`, `runtime.fai
 
 Activity phases are `working`, `thinking`, `responding`, `tool`, `idle`. Details are `processing`, `thinking`, `responding`, `reading_files`, `editing_files`, `running_command`, `using_tool`, `multiple_tools`, `settled`. Only event discriminants and built-in tool categories are inspected. Repeated streaming phases are deduplicated, and concurrent tools take precedence over streaming hints. Thinking events are provider-dependent; missing events do not establish absence of reasoning.
 
+## Connectivity and retained sessions
+
+`GET /intercom/health` projects only version and Pi session ID after the originating runtime's lifecycle guard. It does not call the model/message acceptance path or expose prompts, arguments, results or host internals. Identity matching is correlation on trusted loopback, not authentication or a process-lock guarantee.
+
+`connections.ts` sends HTTP only to configured `127.0.0.1` ports, without redirects/proxies/retries. Limits: 4 KiB response headers, 1 KiB body, 750 ms total per-request deadline by default (including slow bodies), 4 s batch budget, 16 concurrent checks, first 256 inputs/outputs. Skipped/cancelled work is unknown, not disconnected. Missing health support, malformed data and unsupported versions remain unknown; refusal/deadline failure or mismatched session ID means disconnected/unmatched endpoint, never proven process termination.
+
+Checks expire to unknown after 30 seconds. Monitor batches rotate to avoid starvation; skipped checks may retain previous unexpired evidence. Saved-port changes/removal invalidate cached checks. Shared classification/sorting preserves config order within connected-or-unknown and disconnected groups. UI selection follows session ID across these order changes.
+
+Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. No automatic close, retry, restart or work assignment occurs.
+
 ## Read-only JSON status
 
-`intercom_worker_status` reads this same bounded snapshot, using the same `workerObservation` projection as the monitor. It returns configured workers only, optionally selected by name, with last-observed status/activity, timestamp, age, stale/unknown/conflicting evidence, and independent public reports. Missing or future evidence does not imply health. Clear tombstones appear as null reports.
+`intercom_worker_status` reads this same bounded snapshot, using the same `workerObservation` projection as the monitor. It returns configured workers only, optionally selected by name, with last-observed status/activity, timestamp, age, stale/unknown/conflicting evidence, and independent public reports. Missing or future evidence does not imply health. Clear tombstones appear as null reports. Default reads remain local-only with unknown/not_checked connections. `probe:true` checks only the selected page and returns separate connection data; disconnected entries sort last within that page. Page boundaries remain in saved config order, not global connection order.
 
 Pages default to 10 entries (limit 1–20), capped at 40 KiB before the final pagination field, below Pi's tool truncation limits. Follow `nextOffset`; each page is a new local snapshot, not a transaction spanning changing rosters. Snapshot truncation/errors are retained. No model calls, status requests, worker messages, Telegram dependencies or hidden reasoning are involved. Any presentation layer can consume the JSON.
 

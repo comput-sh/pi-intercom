@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { Key, matchesKey, ProcessTerminal, TuiAltScreen, type Component, type TUI } from 'pi-intercom-tui';
 import { readObservationSnapshot, type ObservationSnapshot } from './snapshot.js';
 import { renderMonitor } from './monitor-view.js';
+import { probeWorkers, sortWorkersByConnection, type WorkerConnection } from './connections.js';
 
 export function parseMonitorRoot(args: string[]): string {
   if (args.length !== 2 || args[0] !== '--root' || !path.isAbsolute(args[1])) {
@@ -14,6 +15,8 @@ export function parseMonitorRoot(args: string[]): string {
 
 export interface MonitorOptions {
   read?: typeof readObservationSnapshot;
+  /** Injected readers do not probe unless explicitly supplied. */
+  probe?: typeof probeWorkers;
   rows: () => number;
   requestRender: () => void;
   onQuit: () => void;
@@ -24,13 +27,24 @@ export interface MonitorOptions {
   schedule?: (callback: () => void, delayMs: number) => () => void;
 }
 
-/** No host, probing, network or writes. Closing never awaits an outstanding read. */
+/** Read-only snapshots and bounded health checks. Closing never awaits pending IO. */
 export function createMonitor(root: string, options: MonitorOptions): Component & { start(): void; close(): void } {
   let snapshot: ObservationSnapshot | undefined;
   let selectedIndex = -1;
   let selectedSessionId: string | undefined;
   let details = false;
-  const workers = () => snapshot?.config?.agents.filter(agent => !agent.coordinator) ?? [];
+  const now = options.now ?? Date.now;
+  const workers = (at = now()) => sortWorkersByConnection(snapshot?.config?.agents.filter(agent => !agent.coordinator) ?? [], snapshot?.connections, at);
+  const probe = options.probe ?? (options.read ? undefined : probeWorkers);
+  const abort = new AbortController();
+  let connections: WorkerConnection[] = [];
+  let connectionPorts = new Map<string, number>();
+  let probeStart = 0;
+  const selection = (at = now()) => {
+    const roster = workers(at);
+    const index = roster.findIndex(worker => worker.sessionId === selectedSessionId);
+    return { roster, index: index >= 0 ? index : selectedIndex };
+  };
   const requestRender = () => { try { options.requestRender(); } catch { /* UI shutdown is independent of reading. */ } };
   let closed = false, started = false;
   let cancel: (() => void) | undefined;
@@ -45,6 +59,31 @@ export function createMonitor(root: string, options: MonitorOptions): Component 
     let next: ObservationSnapshot | undefined;
     try { next = await (options.read ?? readObservationSnapshot)(root); } catch { /* Unavailable, no raw errors. */ }
     if (closed) return;
+    if (next?.config && probe) {
+      const roster = next.config.agents.filter(agent => !agent.coordinator);
+      const start = roster.length ? probeStart % roster.length : 0;
+      const rotated = [...roster.slice(start), ...roster.slice(0, start)].slice(0, 256);
+      let checked: WorkerConnection[] = [];
+      try { checked = await probe(rotated, { signal: abort.signal }); } catch { /* Preserve prior checks until stale. */ }
+      if (closed) return;
+      // A check belongs to a saved endpoint, not just a session identity. Keep
+      // the last successful roster across read failures, but retire removed IDs
+      // and invalidate cached evidence when their configured port changes.
+      const ports = new Map(roster.map(worker => [worker.sessionId, worker.port]));
+      const previous = new Map(connections
+        .filter(connection => ports.has(connection.sessionId) && connectionPorts.get(connection.sessionId) === ports.get(connection.sessionId))
+        .map(connection => [connection.sessionId, connection]));
+      connectionPorts = ports;
+      for (const connection of checked) {
+        if (connection.reason !== 'not_checked' || !previous.has(connection.sessionId)) previous.set(connection.sessionId, connection);
+      }
+      connections = roster.flatMap(worker => {
+        const connection = previous.get(worker.sessionId);
+        return connection ? [connection] : [];
+      });
+      probeStart = start + Math.max(1, checked.filter(connection => connection.reason !== 'not_checked').length);
+      next = { ...next, connections };
+    }
     snapshot = next;
     // Preserve identity through reordering, and retain it across transient read failures.
     if (snapshot?.config) {
@@ -60,6 +99,7 @@ export function createMonitor(root: string, options: MonitorOptions): Component 
   const close = () => {
     if (closed) return;
     closed = true;
+    abort.abort();
     cancel?.(); cancel = undefined;
   };
   return {
@@ -69,8 +109,9 @@ export function createMonitor(root: string, options: MonitorOptions): Component 
     render(width) {
       const height = Math.max(0, Math.floor(options.rows()));
       if (width <= 0 || !height) return [];
-      const view = { selectedIndex: snapshot?.config ? selectedIndex : -1, details: !!snapshot?.config && details };
-      try { return renderMonitor(snapshot, width, height, (options.now ?? Date.now)(), options.color, view); }
+      const at = now();
+      const view = { selectedIndex: snapshot?.config ? selection(at).index : -1, details: !!snapshot?.config && details };
+      try { return renderMonitor(snapshot, width, height, at, options.color, view); }
       catch { return renderMonitor(undefined, width, height, Date.now(), options.color, { selectedIndex: -1, details: false }); }
     },
     handleInput(data) {
@@ -81,7 +122,8 @@ export function createMonitor(root: string, options: MonitorOptions): Component 
       if (matchesKey(data, 'q') || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
         close(); options.onQuit(); return;
       }
-      const roster = workers();
+      const { roster, index } = selection();
+      selectedIndex = index;
       if (!roster.length) return;
       if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
         const next = Math.max(0, Math.min(roster.length - 1, selectedIndex + (matchesKey(data, Key.up) ? -1 : 1)));

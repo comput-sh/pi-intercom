@@ -1,4 +1,5 @@
 import type { ObservationSnapshot } from './snapshot.js';
+import { currentConnection, sortWorkersByConnection } from './connections.js';
 
 const labels: Record<string, string> = {
   processing: 'Processing', thinking: 'Thinking', responding: 'Writing response',
@@ -46,15 +47,16 @@ export function workerStatusPage(snapshot: ObservationSnapshot, options: { name?
     roster = roster.filter(a => a.name.toLowerCase() === options.name!.toLowerCase());
     if (snapshot.config && !roster.length) throw new Error('Worker name not found in the retained snapshot');
   }
-  const workers: Array<Record<string, unknown>> = [];
+  const workers: Array<{ sessionId: string; [key: string]: unknown }> = [];
   const result = { version: 1, source: 'local-observations', generatedAt: new Date(now).toISOString(),
-    statusMeaning: 'Last observed, not live liveness or task completion. Reports are self-reported, not approval.',
+    statusMeaning: 'Activity is last observed, not task completion. Connectivity is a separate endpoint check, never proof of termination. Reports are self-reported, not approval.',
     truncated: snapshot.truncated, errors: snapshot.errors, totalInSnapshot: roster.length, offset,
     nextOffset: null as number | null, workers };
   for (const agent of roster.slice(offset, offset + limit)) {
     const report = snapshot.reports?.find(r => r.sessionId === agent.sessionId && r.status !== 'clear');
     const reportAge = report ? now - Date.parse(report.updatedAt) : NaN;
     const entry = { sessionId: agent.sessionId, name: agent.name, ...workerObservation(snapshot, agent.sessionId, now),
+      connection: currentConnection(agent.sessionId, snapshot.connections, now),
       report: report ? { status: report.status, summary: report.summary, updatedAt: report.updatedAt,
         ageSeconds: Number.isFinite(reportAge) && reportAge >= 0 ? Math.floor(reportAge / 1000) : null,
         selfReported: true } : null };
@@ -62,5 +64,7 @@ export function workerStatusPage(snapshot: ObservationSnapshot, options: { name?
     if (Buffer.byteLength(JSON.stringify(result, null, 2)) > 40000) { workers.pop(); break; }
   }
   if (offset + workers.length < roster.length) result.nextOffset = offset + workers.length;
+  // Page boundaries remain in saved roster order; disconnected entries sort last within the page.
+  workers.splice(0, workers.length, ...sortWorkersByConnection(workers, snapshot.connections, now));
   return result;
 }

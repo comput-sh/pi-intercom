@@ -6,6 +6,7 @@ import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } 
 import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
+import { probeWorker, probeWorkers } from './connections.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and close_worker are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. See references/implementation-blocker.md. A verified supported host API is required (no version-only override).';
 export interface Host {
@@ -21,6 +22,7 @@ export interface RuntimeOptions {
   launch(request: LaunchRequest): Promise<unknown>;
   listen?: typeof listen;
   send?: typeof send;
+  probe?: typeof probeWorker;
   store?: (root: string) => ConfigStore;
   observe?: (root: string, sessionId: string) => Observer;
 }
@@ -35,6 +37,8 @@ export class Intercom {
   private closing?: Promise<void>;
   private reportWrites: Promise<void> = Promise.resolve();
   private pendingReports = 0;
+  private probeController = new AbortController();
+  private resumeFences = new Map<string, { inFlight: boolean; submitted: boolean; announced: boolean }>();
   private captureObserver(): (event: EventType, metadata?: EventMetadata) => void {
     const observer = this.observer;
     return (event, metadata = {}) => {
@@ -60,6 +64,8 @@ export class Intercom {
     if (this.closing) await this.closing;
     if (this.active) fail('runtime already active');
     this.initialId = this.host.sessionId(); this.active = true;
+    this.probeController = new AbortController();
+    this.resumeFences.clear();
     const generation = ++this.generation, assertValid = this.validity();
     let record = this.captureObserver();
     try {
@@ -72,7 +78,10 @@ export class Intercom {
       const previous = discovered ? await this.store.read() : undefined;
       assertValid();
       const own = previous?.agents.find(a => a.sessionId === this.id());
-      const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); });
+      const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
+        assertValid();
+        return { version: 1, sessionId: this.initialId };
+      });
       try { assertValid(); } catch (error) { await endpoint.close(); throw error; }
       this.endpoint = endpoint;
       if (!previous) {
@@ -118,6 +127,7 @@ export class Intercom {
     this.recordObservation('runtime.closed');
     const observer = this.observer; this.observer = undefined;
     this.active = false; this.generation++;
+    this.probeController.abort();
     const endpoint = this.endpoint; this.endpoint = undefined;
     this.responsibility = undefined;
     const closing = (async () => {
@@ -202,6 +212,8 @@ export class Intercom {
   private async handleReceive(message: Envelope): Promise<void> {
     const record = this.captureObserver();
     const assertValid = this.validity();
+    const receivedFence = message.kind === 'status' ? this.resumeFences.get(message.from) : undefined;
+    const eligibleAnnouncement = receivedFence?.submitted ? receivedFence : undefined;
     const { id, config, me } = await this.state();
     assertValid();
     if (message.to !== id) fail('recipient session ID mismatch (stale endpoint)');
@@ -233,6 +245,12 @@ export class Intercom {
           const entry = c.agents.find(a => a.sessionId === message.from && !a.coordinator);
           if (entry) entry.port = message.payload.port as number;
         }, assertValid);
+        assertValid();
+        const fence = sender && this.resumeFences.get(sender.sessionId);
+        if (fence && fence === eligibleAnnouncement) {
+          fence.announced = true;
+          if (!fence.inFlight) this.resumeFences.delete(sender!.sessionId);
+        }
         record('status.received', { ...metadata, busy: message.payload.busy as boolean, port: message.payload.port as number });
         if (sender) record('config.changed', { operation: 'port_update', peerSessionId: message.from, port: message.payload.port as number, outcome: 'written' });
         notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender }));
@@ -291,7 +309,14 @@ export class Intercom {
       if (!me) fail('worker_status requires a configured session');
       const snapshot = await readObservationSnapshot(this.store.root);
       assertValid();
-      return workerStatusPage(snapshot, { name: args.name as string | undefined, offset: args.offset as number | undefined, limit: args.limit as number | undefined });
+      if (args.probe !== undefined && typeof args.probe !== 'boolean') fail('probe must be a boolean');
+      const pageOptions = { name: args.name as string | undefined, offset: args.offset as number | undefined, limit: args.limit as number | undefined };
+      const page = workerStatusPage(snapshot, pageOptions);
+      if (!args.probe) return page;
+      const ids = new Set(page.workers.map(worker => worker.sessionId));
+      snapshot.connections = await probeWorkers(snapshot.config?.agents.filter(agent => !agent.coordinator && ids.has(agent.sessionId)) ?? [], { signal: this.probeController.signal });
+      assertValid();
+      return workerStatusPage(snapshot, pageOptions);
     }
     if (operation === 'list') {
       if (!me) fail('anonymous intercom_list permissions unresolved (TODO); no coordinator privileges');
@@ -331,9 +356,31 @@ export class Intercom {
       return { accepted: true, completion: 'not awaited' };
     }
     if (operation === 'resume_worker') {
-      const relative = await directory(this.store.root, target.projectDirectory);
-      assertValid();
-      return this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), sessionId: target.sessionId });
+      if (args.confirmClosed !== true) fail('Resume requires explicit user confirmation that the previous worker session is closed (confirmClosed:true). Disconnected alone is not proof of closure.');
+      if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
+      const fence = { inFlight: true, submitted: false, announced: false };
+      this.resumeFences.set(target.sessionId, fence);
+      let completed = false;
+      try {
+        const connection = await (this.options.probe ?? probeWorker)(target, { signal: this.probeController.signal });
+        assertValid();
+        if (connection.state === 'connected') fail('Worker endpoint is still connected; refusing to resume the same session twice.');
+        const relative = await directory(this.store.root, target.projectDirectory);
+        assertValid();
+        const cwd = path.resolve(this.store.root, relative);
+        const fresh = await this.state();
+        assertValid();
+        requireCoordinator(fresh.config, id);
+        const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
+        if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory) fail('Worker configuration changed during resume check; no launch submitted.');
+        fence.submitted = true;
+        const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, sessionId: current.sessionId });
+        completed = true;
+        return result;
+      } finally {
+        fence.inFlight = false;
+        if ((!fence.submitted || (completed && fence.announced)) && this.resumeFences.get(target.sessionId) === fence) this.resumeFences.delete(target.sessionId);
+      }
     }
     if (operation === 'remove_worker') {
       // No live process claim: the caller must explicitly ensure closure first.

@@ -27,6 +27,7 @@ async function setup(t) {
       await accept(message);
     },
     launch: async r => { launches.push(r); return { launched: true }; },
+    probe: async agent => ({ sessionId: agent.sessionId, state: 'disconnected', checkedAt: new Date().toISOString(), reason: 'refused' }),
   };
   async function start(id) {
     const messages = [], notices = [], names = [];
@@ -193,11 +194,99 @@ test('coordinator unavailable leaves endpoint open; no retries/replacement and s
 test('resume, launcher setting and explicit removal do not orchestrate other actions', async t => {
   const { c, w, launches } = await configured(t);
   await c.runtime.tool('set_multiplexer', { multiplexer: 'none' });
-  await c.runtime.tool('resume_worker', { to: 'Builder' });
+  await w.runtime.close();
+  await c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true });
   assert.equal(launches.at(-1).sessionId, 'w'); assert.equal(launches.at(-1).multiplexer, 'none');
   await w.runtime.close();
   await c.runtime.tool('remove_worker', { to: 'Builder' });
   assert.equal((await c.runtime.store.read()).agents.length, 1);
+});
+test('resume requires manual closure confirmation and fences concurrent/uncertain launches', async t => {
+  const { c, w, launches, start } = await configured(t);
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Builder' }), /explicit user confirmation/);
+  assert.equal(launches.length, 0);
+  await w.runtime.close();
+  let release;
+  c.runtime.options.probe = agent => new Promise(resolve => { release = () => resolve({ sessionId: agent.sessionId, state: 'disconnected', checkedAt: new Date().toISOString(), reason: 'refused' }); });
+  const first = c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true });
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true }), /in flight/);
+  release(); await first;
+  assert.equal(launches.length, 1);
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true }), /in flight|uncertain/);
+  const resumed = await start('w'); // A real configured status announcement retires the local attempt fence.
+  await resumed.runtime.close();
+  c.runtime.options.probe = async agent => ({ sessionId: agent.sessionId, state: 'disconnected', checkedAt: new Date().toISOString(), reason: 'refused' });
+  c.runtime.options.launch = async () => { throw new Error('uncertain launch failure'); };
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true }), /uncertain launch failure/);
+  await assert.rejects(c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true }), /in flight|uncertain/);
+  assert.ok((await c.runtime.store.read()).agents.some(a => a.sessionId === 'w'));
+});
+test('preflight and in-flight status cannot unfence an uncertain resume failure', async t => {
+  for (const when of ['preflight', 'launch']) {
+    const { c, w } = await configured(t);
+    const port = w.runtime.endpoint.port;
+    await w.runtime.close();
+    const status = () => c.runtime.receive({ version:1, kind:'status', from:'w', to:'c', payload:{port,busy:false} });
+    c.runtime.options.probe = async agent => {
+      if (when === 'preflight') await status();
+      return {sessionId:agent.sessionId,state:'unknown',checkedAt:new Date().toISOString(),reason:'legacy'};
+    };
+    let calls = 0;
+    c.runtime.options.launch = async () => {
+      calls++;
+      if (when === 'launch') await status();
+      throw new Error('uncertain submission');
+    };
+    await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /uncertain submission/);
+    await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /in flight|uncertain/);
+    assert.equal(calls,1);
+  }
+});
+test('a delayed preflight status write is not a post-launch announcement', async t => {
+  const { c, w } = await configured(t);
+  const port = w.runtime.endpoint.port;
+  await w.runtime.close();
+  const update = c.runtime.store.update.bind(c.runtime.store);
+  let releaseWrite, status;
+  c.runtime.store.update = async (...args) => {
+    await new Promise(resolve => { releaseWrite = resolve; });
+    return update(...args);
+  };
+  c.runtime.options.probe = async agent => {
+    status = c.runtime.receive({version:1,kind:'status',from:'w',to:'c',payload:{port,busy:false}});
+    while (!releaseWrite) await new Promise(resolve => setTimeout(resolve,1));
+    return {sessionId:agent.sessionId,state:'unknown',checkedAt:new Date().toISOString(),reason:'legacy'};
+  };
+  let launches = 0;
+  c.runtime.options.launch = async () => { launches++; releaseWrite(); await status; return {launched:true}; };
+  await c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true});
+  await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /in flight|uncertain/);
+  assert.equal(launches,1);
+});
+test('worker removal during directory resolution is rechecked before resume launch', async t => {
+  const { c, launches } = await configured(t);
+  const store = c.runtime.store, root = store.root, state = c.runtime.state.bind(c.runtime);
+  let pending, triggered = false;
+  Object.defineProperty(store, 'root', { get() {
+    if (!triggered) {
+      triggered = true;
+      pending = store.update('c', config => { config.agents = config.agents.filter(a => a.sessionId !== 'w'); });
+    }
+    return root;
+  } });
+  c.runtime.state = async () => { if (pending) await pending; return state(); };
+  await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /configuration changed/);
+  assert.equal(launches.length,0);
+});
+test('changed worker endpoint during resume check prevents launch', async t => {
+  const { c, launches } = await configured(t);
+  c.runtime.options.probe = async agent => {
+    await c.runtime.store.update('c', config => { config.agents.find(a => a.sessionId === agent.sessionId).port++; });
+    return {sessionId:agent.sessionId,state:'disconnected',checkedAt:new Date().toISOString(),reason:'refused'};
+  };
+  await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /configuration changed/);
+  assert.equal(launches.length,0);
 });
 test('existing worker startup restores role/name, reports new port and starts no work', async t => {
   const { c, w, start } = await configured(t);
@@ -227,7 +316,7 @@ test('close or session switch during directory resolution prevents create/resume
         }
         return root;
       } });
-      await assert.rejects(c.runtime.tool(operation, { to: 'Builder' }), /inactive|replaced/);
+      await assert.rejects(c.runtime.tool(operation, { to: 'Builder', confirmClosed: true }), /inactive|replaced/);
       await closing;
       assert.equal(launches.length, 0);
     }
