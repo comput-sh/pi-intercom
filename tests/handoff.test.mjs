@@ -10,16 +10,29 @@ import { HandoffWorkflow } from '../dist/handoff.js';
 
 const identity = { workspaceId: 'space', paneId: 'pane', terminalId: 'terminal', sessionId: 'w', sessionFile: '/private/session.jsonl', pid: 123, processStart: '456' };
 const pause = () => new Promise(resolve => setTimeout(resolve, 5));
+// Fixture-only diagnostics: bounded public states/codes, never raw config,
+// summary text, pane identity, filesystem paths or full exception messages.
+const activeDiagnostics = new Set();
 async function until(check) {
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline) { const value = await check(); if (value) return value; await pause(); }
-  assert.fail('condition did not settle');
+  const diagnostics = [...activeDiagnostics].slice(0, 16).map(snapshot => snapshot());
+  assert.fail(`condition did not settle; fixture diagnostics: ${JSON.stringify(diagnostics).slice(0, 12000)}`);
 }
 async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-handoff-'));
   await new ConfigStore(root).initialize('c', 12345);
   const wire = [], deliveries = [], closes = [], inspections = [];
-  let busy = false;
+  const updates = [];
+  let lastReadState = null, firstUpdateFailure = null, busy = false;
+  const recordUpdate = event => { updates.push(event); if (updates.length > 24) updates.shift(); };
+  const diagnostics = () => {
+    const pending = c.handoff?.jobs.get('w'); // Test-only visibility into the retained failure fence.
+    return { lastReadState, firstUpdateFailure, updates, wireKinds: wire.slice(-16).map(message => message.kind), closeCalls: closes.length,
+      runtimeJob: pending ? { state: pending.job.state, ended: pending.ended, closing: pending.closing } : null };
+  };
+  activeDiagnostics.add(diagnostics);
+  t.after(() => { activeDiagnostics.delete(diagnostics); });
   const provider = {
     getIdentity: async () => ({ ...identity }),
     inspect: async (proof, id, guard) => { guard(); inspections.push(proof); assert.equal(id, 'w'); },
@@ -34,10 +47,34 @@ async function fixture(t, options = {}) {
     deliver: text => deliveries.push({ id, text }), setName: async () => {}, notify() {} });
   const c = new Intercom(host('c'), shared), w = new Intercom(host('w'), shared);
   t.after(async () => { await w.close(); await c.close(); await rm(root, { recursive: true, force: true }); });
-  await c.start(); await w.start();
+  await c.start();
+  const update = c.store.update.bind(c.store);
+  c.store.update = async (id, mutate, guard) => {
+    let attemptedState = null;
+    try {
+      const result = await update(id, async config => {
+        await mutate(config);
+        attemptedState = config.agents.find(agent => agent.sessionId === 'w')?.closeJob?.state ?? null;
+        recordUpdate({ stage: 'mutated', state: attemptedState });
+      }, guard);
+      recordUpdate({ stage: 'published', state: attemptedState });
+      return result;
+    } catch (error) {
+      const failure = { stage: 'rejected', state: attemptedState, code: typeof error.code === 'string' ? error.code.slice(0, 64) : null,
+        syscall: typeof error.syscall === 'string' ? error.syscall.slice(0, 64) : null };
+      firstUpdateFailure ??= failure;
+      recordUpdate(failure);
+      throw error;
+    }
+  };
+  await w.start();
   await c.tool('configure_worker', { sessionId: 'w', port: w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Scoped work' });
   await c.tool('reload_worker', { to: 'Worker' });
-  const entry = async () => (await c.store.read()).agents.find(a => a.sessionId === 'w');
+  const entry = async () => {
+    const value = (await c.store.read()).agents.find(a => a.sessionId === 'w');
+    lastReadState = value?.closeJob ? { state: value.closeJob.state, reason: value.closeJob.reason ?? null } : null;
+    return value;
+  };
   const request = async () => (await c.tool('close_worker', { to: 'Worker' })).job;
   const prepared = async () => until(async () => deliveries.find(d => d.id === 'w' && d.text.includes('intercom_report_handoff')));
   const report = async job => { w.workerStarted(); await w.tool('report_handoff', { jobId: job.jobId, summary: 'Completed tests; pending review. src/runtime.ts' }, 'handoff-tool'); };
