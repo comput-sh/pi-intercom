@@ -7,8 +7,9 @@ import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
+import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
 
-export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and close_worker are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. See references/implementation-blocker.md. A verified supported host API is required (no version-only override).';
+export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
 export interface Host {
   sessionId(): string;
   cwd: string;
@@ -25,6 +26,9 @@ export interface RuntimeOptions {
   probe?: typeof probeWorker;
   store?: (root: string) => ConfigStore;
   observe?: (root: string, sessionId: string) => Observer;
+  closeProvider?: CloseProvider;
+  /** Test seam; production defaults to 120 seconds, values above that are capped. */
+  closeTimeoutMs?: number;
 }
 export class Intercom {
   store!: ConfigStore;
@@ -39,6 +43,9 @@ export class Intercom {
   private pendingReports = 0;
   private probeController = new AbortController();
   private resumeFences = new Map<string, { inFlight: boolean; submitted: boolean; announced: boolean }>();
+  private handoff?: HandoffWorkflow;
+  workerStarted(): void { this.handoff?.workerStarted(); }
+  workerSettled(successfulToolCallIds: ReadonlySet<string>): void { this.handoff?.workerSettled(successfulToolCallIds); }
   private captureObserver(): (event: EventType, metadata?: EventMetadata) => void {
     const observer = this.observer;
     return (event, metadata = {}) => {
@@ -91,7 +98,23 @@ export class Intercom {
       const config = await this.store.read();
       assertValid();
       const me = config.agents.find(a => a.sessionId === this.id());
+      this.handoff = new HandoffWorkflow({
+        state: () => this.state(), assertCurrent: assertValid,
+        update: async (mutate, guard) => {
+          await this.store.update(this.initialId, mutate, () => { assertValid(); guard?.(); });
+        },
+        send: async (sessionId, kind, payload) => {
+          const state = await this.state(); assertValid();
+          const target = state.config.agents.find(a => a.sessionId === sessionId);
+          if (!target) fail('handoff recipient no longer configured');
+          await (this.options.send ?? send)(target.port, { version: 1, kind, from: state.id, to: sessionId, payload, correlationId: randomUUID() });
+          assertValid();
+        },
+        deliver: message => { assertValid(); this.host.deliver(message, this.host.busy()); },
+        busy: () => this.host.busy(), provider: this.options.closeProvider, timeoutMs: this.options.closeTimeoutMs,
+      });
       if (me?.coordinator) {
+        await this.handoff.recover(); assertValid();
         try { this.observer?.maintain?.(); } catch { /* No cleanup failure affects readiness. */ }
         await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint!.port; }, assertValid);
         assertValid();
@@ -128,6 +151,7 @@ export class Intercom {
     const observer = this.observer; this.observer = undefined;
     this.active = false; this.generation++;
     this.probeController.abort();
+    this.handoff?.dispose(); this.handoff = undefined;
     const endpoint = this.endpoint; this.endpoint = undefined;
     this.responsibility = undefined;
     const closing = (async () => {
@@ -170,7 +194,8 @@ export class Intercom {
     assertValid();
     if (!me) fail('worker not configured; configure_worker must run before reload_worker');
     this.responsibility = { ...me };
-    await this.host.setName(me.name);
+    // Coordinator is a routing identity, not ownership of the user's Pi/tab title.
+    if (!me.coordinator) await this.host.setName(me.name);
     assertValid();
     record('config.reloaded', { role: me.coordinator ? 'coordinator' : 'worker' });
     this.host.notify(`Intercom responsibility loaded for ${me.name}; no work turn started.`);
@@ -181,6 +206,7 @@ export class Intercom {
     const { id, config } = await this.state();
     assertValid();
     const target = named(config, to), correlationId = randomUUID();
+    if (['message', 'reload'].includes(kind) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob))) fail('worker close is active or uncertain; new Intercom work is fenced');
     const metadata = { peerSessionId: target.sessionId, peerName: target.name, correlationId, kind };
     record('transport.send', { ...metadata, outcome: 'attempted' });
     try {
@@ -232,6 +258,10 @@ export class Intercom {
         throw error;
       }
     };
+    if (HANDOFF_KINDS.includes(message.kind)) {
+      if (!this.handoff || !me || (!me.coordinator && !this.responsibility)) fail('handoff requires a configured, responsibility-loaded worker');
+      await this.handoff.receive(message.kind as HandoffKind, message.from, message.payload); return;
+    }
     if (message.kind === 'registration' || message.kind === 'status') {
       requireCoordinator(config, id);
       if (sender?.coordinator) fail('coordinator cannot report as worker');
@@ -281,12 +311,16 @@ export class Intercom {
     if (message.kind === 'message') {
       if (!sender || !me) fail('agent messaging requires configured sender and recipient; anonymous permissions TODO');
       if (!this.responsibility) fail('worker must load responsibility before receiving work');
+      if (this.handoff?.workerClosing || fencedClose(me.closeJob)) fail('worker close is active or uncertain; new Intercom work is fenced');
       notify('agent message', message.payload.message as string); return;
     }
     if (!sender?.coordinator) fail('control requires current coordinator sender session ID');
     if (me?.coordinator) fail('worker control cannot target coordinator');
     if (message.kind === 'stop' || message.kind === 'close') fail(UNSUPPORTED_CANCELLATION);
-    if (message.kind === 'reload') { await this.reload(); return; }
+    if (message.kind === 'reload') {
+      if (this.handoff?.workerClosing || fencedClose(me?.closeJob)) fail('worker close is active or uncertain; reload is fenced');
+      await this.reload(); return;
+    }
     if (message.kind === 'request_status') {
       // Independent one-way report, never a synchronous status in the HTTP response.
       setImmediate(() => {
@@ -300,7 +334,7 @@ export class Intercom {
     }
     fail('unsupported control');
   }
-  async tool(operation: string, args: Record<string, unknown>): Promise<unknown> {
+  async tool(operation: string, args: Record<string, unknown>, toolCallId?: string): Promise<unknown> {
     const record = this.captureObserver();
     const assertValid = this.validity();
     const { id, config, me } = await this.state();
@@ -322,6 +356,10 @@ export class Intercom {
       if (!me) fail('anonymous intercom_list permissions unresolved (TODO); no coordinator privileges');
       return { ...config, agents: config.agents.map(({ dashboardPort: _retired, ...agent }) => agent) };
     }
+    if (operation === 'report_handoff') {
+      if (!me || me.coordinator || !this.responsibility || !this.handoff) fail('report_handoff requires a configured, responsibility-loaded worker');
+      return this.handoff.report(args.jobId, args.summary, toolCallId);
+    }
     if (operation === 'report_status') { await this.report(); return { accepted: true }; }
     if (operation === 'report_work') {
       if (!me || me.coordinator || !this.responsibility) fail('report_work requires a configured, responsibility-loaded worker');
@@ -331,12 +369,19 @@ export class Intercom {
     }
     if (operation === 'send') {
       if (!me || !this.responsibility) fail('anonymous/unloaded worker cannot send agent messages (permissions TODO)');
+      const recipient = named(config, args.to as string);
+      if (this.handoff?.workerClosing || fencedClose(me.closeJob) || this.handoff?.isClosing(recipient.sessionId) || fencedClose(recipient.closeJob)) fail('worker close is active or uncertain; new Intercom work is fenced');
       await this.transmit(args.to as string, 'message', { message: args.message }); return { accepted: true, completion: 'not awaited' };
     }
     requireCoordinator(config, id);
-    if (operation === 'stop_worker' || operation === 'close_worker') fail(UNSUPPORTED_CANCELLATION);
+    if (operation === 'stop_worker') fail(UNSUPPORTED_CANCELLATION);
     if (operation === 'configure_worker') {
-      await this.store.configure(id, args as unknown as Omit<Agent, 'coordinator'>, assertValid);
+      const assertConfigurable = () => {
+        assertValid();
+        if (this.handoff?.isClosing(args.sessionId as string) || this.resumeFences.has(args.sessionId as string)) fail('worker lifecycle operation is in flight; configuration is fenced');
+      };
+      assertConfigurable();
+      await this.store.configure(id, args as unknown as Omit<Agent, 'coordinator'>, assertConfigurable);
       record('config.changed', { operation: 'configure_worker', peerSessionId: args.sessionId as string, peerName: args.name as string, outcome: 'written' });
       return { written: true, reloaded: false };
     }
@@ -351,6 +396,12 @@ export class Intercom {
     }
     const target = named(config, args.to as string);
     if (target.coordinator) fail('operation requires a worker target');
+    if (operation === 'close_worker') {
+      if (!this.options.closeProvider || !this.handoff || config.multiplexer !== 'herdr') fail('Owned-pane close requires supported Linux Herdr provider; no closure attempted');
+      if (this.resumeFences.has(target.sessionId)) fail('resume is in flight; close is fenced');
+      return { job: await this.handoff.request(target), completion: 'not awaited', contract: 'best-effort owned-pane closure; not all-child-process termination' };
+    }
+    if (['reload_worker', 'resume_worker', 'remove_worker'].includes(operation) && (this.handoff?.isClosing(target.sessionId) || fencedClose(target.closeJob))) fail('worker close is active or uncertain; operation is fenced');
     if (operation === 'reload_worker' || operation === 'request_status') {
       await this.transmit(target.name, operation === 'reload_worker' ? 'reload' : 'request_status');
       return { accepted: true, completion: 'not awaited' };
@@ -373,6 +424,7 @@ export class Intercom {
         requireCoordinator(fresh.config, id);
         const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
         if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory) fail('Worker configuration changed during resume check; no launch submitted.');
+        if (this.handoff?.isClosing(target.sessionId) || fencedClose(current.closeJob)) fail('worker close is active or uncertain; resume is fenced');
         fence.submitted = true;
         const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, sessionId: current.sessionId });
         completed = true;
@@ -384,7 +436,11 @@ export class Intercom {
     }
     if (operation === 'remove_worker') {
       // No live process claim: the caller must explicitly ensure closure first.
-      await this.store.update(id, c => { c.agents = c.agents.filter(a => a.sessionId !== target.sessionId); }, assertValid);
+      await this.store.update(id, c => {
+        const current = c.agents.find(a => a.sessionId === target.sessionId);
+        if (this.handoff?.isClosing(target.sessionId) || this.resumeFences.has(target.sessionId) || fencedClose(current?.closeJob)) fail('worker lifecycle operation is active or uncertain; removal is fenced');
+        c.agents = c.agents.filter(a => a.sessionId !== target.sessionId);
+      }, assertValid);
       record('config.changed', { operation: 'remove_worker', peerSessionId: target.sessionId, peerName: target.name, outcome: 'removed' });
       return { removed: true, processStopped: false, sessionDeleted: false };
     }

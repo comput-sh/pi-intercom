@@ -45,6 +45,12 @@ async function fixture(t) {
 test('real HTTP runtime registration, passive configure/reload, peer delivery and independent status', async t => {
   const f = await fixture(t), c = await f.start('coordinator'), a = await f.start('worker-a');
   assert.equal(c.messages.length, 1);
+  assert.deepEqual(c.names, [], 'coordinator startup must not rename the Pi session or Herdr tab');
+  let existingTitle = 'User project session';
+  c.host.setName = async name => { existingTitle = name; };
+  await c.runtime.reload();
+  assert.equal(existingTitle, 'User project session');
+  assert.equal(c.runtime.responsibility.name, 'Coordinator');
   assert.match(c.messages[0].text, /Intercom registration/);
   assert.match(c.messages[0].text, /"sessionId":"worker-a"/);
   assert.equal((await c.runtime.store.read()).agents.length, 1);
@@ -58,6 +64,9 @@ test('real HTTP runtime registration, passive configure/reload, peer delivery an
   assert.equal(a.runtime.responsibility.description, 'Alpha assigned remit');
   assert.deepEqual(a.names, ['Alpha']);
   assert.equal(a.messages.length, 0);
+  await a.runtime.tool('send', { to: 'Coordinator', message: 'Reserved coordinator routing still works' });
+  assert.match(c.messages.at(-1).text, /Reserved coordinator routing still works/);
+  assert.equal(existingTitle, 'User project session');
   await c.runtime.tool('send', { to: 'Alpha', message: 'Explicit assignment' });
   assert.match(a.messages.at(-1).text, /Explicit assignment/);
   assert.equal(a.messages.at(-1).busy, false);

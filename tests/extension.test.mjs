@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore } from '../dist/config.js';
+import { Intercom } from '../dist/runtime.js';
 import { listen, send } from '../dist/transport.js';
 import { readObservationSnapshot } from '../dist/snapshot.js';
 
@@ -34,7 +35,7 @@ async function adapter(t) {
   };
   extension(pi);
   const ctx = { cwd: root, mode: 'tui', isProjectTrusted: () => true, isIdle: () => idle,
-    sessionManager: { getSessionId: () => id }, ui: { notify: (text, level) => notices.push({ text, level }),
+    sessionManager: { getSessionId: () => id, getBranch: () => [], getSessionFile: () => undefined }, ui: { notify: (text, level) => notices.push({ text, level }),
       setWidget: (...args) => widgets.push(args) } };
   t.after(async () => {
     try { await events.get('session_shutdown')(); }
@@ -53,13 +54,28 @@ async function adapter(t) {
 }
 const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? 'Windows/Linux extension startup adapter' : false };
 
-test('standalone monitor replaces inline widget and missing Herdr never prevents messaging', supportedHost, async t => {
+test('empty roster skips monitor; first registered worker requests it without probing liveness', supportedHost, async t => {
   const a = await adapter(t); await a.start();
   assert.equal(a.widgets.length, 0);
   assert.equal(a.messages.length, 0);
+  assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
+  await a.invoke('configure_worker', {sessionId:'saved-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
   assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
+  await a.invoke('send', {to:'Coordinator',message:'Messaging works without monitor'});
+  assert.equal(a.messages.length, 1);
+  const count = a.notices.filter(n => /monitor|Herdr/i.test(n.text)).length;
   a.setId('monitor-replacement-worker'); await a.start();
   assert.equal(a.widgets.length, 0);
+  assert.equal(a.notices.filter(n => /monitor|Herdr/i.test(n.text)).length, count, 'worker sessions do not request a monitor');
+});
+
+test('startup with a saved disconnected worker still requests monitor without renaming coordinator', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('adapter-coordinator', 12345);
+  await store.configure('adapter-coordinator', {sessionId:'offline-worker',name:'Offline',description:'Retained worker',port:12346,projectDirectory:'.'});
+  await a.start();
+  assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
+  assert.deepEqual(a.names, []);
 });
 
 test('phase telemetry uses only public discriminants and never reads reasoning or tool payloads', supportedHost, async t => {
@@ -79,11 +95,31 @@ test('phase telemetry uses only public discriminants and never reads reasoning o
   ]);
 });
 
+test('handoff settlement observes only persisted successful tool IDs and new input invalidates readiness', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  const originalSettled = Intercom.prototype.workerSettled, originalStarted = Intercom.prototype.workerStarted;
+  let ids, invalidations = 0;
+  Intercom.prototype.workerSettled = function(value) { ids = [...value]; };
+  Intercom.prototype.workerStarted = function() { invalidations++; };
+  t.after(() => { Intercom.prototype.workerSettled = originalSettled; Intercom.prototype.workerStarted = originalStarted; });
+  const privateBody = () => assert.fail('must not inspect message bodies or reasoning');
+  a.ctx.sessionManager.getBranch = () => [
+    {type:'message',message:{role:'assistant',get content(){return privateBody();}}},
+    {type:'message',message:{role:'toolResult',toolCallId:'saved',isError:false,get content(){return privateBody();}}},
+    {type:'message',message:{role:'toolResult',toolCallId:'failed',isError:true,get content(){return privateBody();}}},
+    {type:'custom',get message(){return privateBody();}},
+  ];
+  await a.events.get('input')({},a.ctx);
+  await a.events.get('agent_start')({},a.ctx);
+  await a.events.get('agent_settled')({},a.ctx);
+  assert.equal(invalidations,2); assert.deepEqual(ids,['saved']);
+});
+
 test('single extension registers all agreed tools without starting resources in factory', async () => {
   const tools = new Map(), events = new Map();
   extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
-  assert.equal(tools.size, 14);
-  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
+  assert.equal(tools.size, 15);
+  assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
@@ -108,7 +144,7 @@ test('adapter rejects untrusted/noninteractive startup before creating config', 
 test('adapter startup is passive, adds responsibility, routes idle/steering and replaces session listener', supportedHost, async t => {
   const a = await adapter(t); await a.start();
   assert.equal(a.messages.length, 0);
-  assert.deepEqual(a.names, ['Coordinator']);
+  assert.deepEqual(a.names, []);
   const prompt = await a.prompt();
   assert.match(prompt.systemPrompt, /^Original system prompt/);
   assert.match(prompt.systemPrompt, /Identity: Coordinator \(adapter-coordinator\)/);
@@ -304,9 +340,18 @@ test('shutdown during pending legacy migration fences the write and new monitor 
   await assert.rejects(a.invoke('list'), /not initialized/);
 });
 
-test('adapter name-sync startup failure retains endpoint, malformed config startup reports failure', supportedHost, async t => {
-  const a = await adapter(t); a.failName(true); await a.start();
+test('worker name-sync failure still retains its endpoint and configured permissions', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  await a.invoke('configure_worker', {sessionId:'name-failure-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
+  a.setId('name-failure-worker'); a.failName(true); await a.start();
   assert.ok(a.notices.some(n => /Name\/responsibility synchronization failed/.test(n.text)));
+  await a.invoke('list');
+});
+
+test('coordinator startup does not attempt name synchronization; malformed config reports failure', supportedHost, async t => {
+  const a = await adapter(t); a.failName(true); await a.start();
+  assert.equal(a.notices.some(n => /Name\/responsibility synchronization failed/.test(n.text)), false);
+  assert.deepEqual(a.names, []);
   assert.equal(a.messages.length, 0);
   await a.invoke('list');
   await a.invoke('send', { to: 'Coordinator', message: 'Endpoint retained' });

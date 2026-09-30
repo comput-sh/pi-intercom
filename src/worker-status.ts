@@ -1,4 +1,4 @@
-import type { ObservationSnapshot } from './snapshot.js';
+import { publicCloseMetadata, type ObservationSnapshot } from './snapshot.js';
 import { currentConnection, sortWorkersByConnection } from './connections.js';
 
 const labels: Record<string, string> = {
@@ -49,14 +49,21 @@ export function workerStatusPage(snapshot: ObservationSnapshot, options: { name?
   }
   const workers: Array<{ sessionId: string; [key: string]: unknown }> = [];
   const result = { version: 1, source: 'local-observations', generatedAt: new Date(now).toISOString(),
-    statusMeaning: 'Activity is last observed, not task completion. Connectivity is a separate endpoint check, never proof of termination. Reports are self-reported, not approval.',
+    statusMeaning: 'Activity is last observed, not task completion. Connectivity is a separate endpoint check, never proof of termination. Reports are self-reported, not approval. Handoff is saved public context, not task completion; closeJob is workflow state, never proof that all child processes terminated.',
     truncated: snapshot.truncated, errors: snapshot.errors, totalInSnapshot: roster.length, offset,
     nextOffset: null as number | null, workers };
   for (const agent of roster.slice(offset, offset + limit)) {
     const report = snapshot.reports?.find(r => r.sessionId === agent.sessionId && r.status !== 'clear');
     const reportAge = report ? now - Date.parse(report.updatedAt) : NaN;
+    const saved = publicCloseMetadata(agent);
+    const ageSeconds = (timestamp: string) => {
+      const age = now - Date.parse(timestamp);
+      return Number.isFinite(age) && age >= 0 ? Math.floor(age / 1000) : null;
+    };
     const entry = { sessionId: agent.sessionId, name: agent.name, ...workerObservation(snapshot, agent.sessionId, now),
       connection: currentConnection(agent.sessionId, snapshot.connections, now),
+      handoff: saved.handoff ? { ...saved.handoff, ageSeconds: ageSeconds(saved.handoff.updatedAt), selfReported: true } : null,
+      closeJob: saved.closeJob ? { ...saved.closeJob, ageSeconds: ageSeconds(saved.closeJob.updatedAt) } : null,
       report: report ? { status: report.status, summary: report.summary, updatedAt: report.updatedAt,
         ageSeconds: Number.isFinite(reportAge) && reportAge >= 0 ? Math.floor(reportAge / 1000) : null,
         selfReported: true } : null };

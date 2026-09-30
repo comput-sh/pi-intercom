@@ -1,6 +1,7 @@
 import { mkdir, readFile, realpath, rename, unlink, open, link, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { fencedClose, validateHandoff, validateCloseJob, type Handoff, type CloseJob } from './handoff.js';
 
 export interface Agent {
   sessionId: string;
@@ -11,6 +12,8 @@ export interface Agent {
   /** Legacy browser dashboard field, accepted for migration only; removed at coordinator startup. */
   dashboardPort?: number;
   projectDirectory: string;
+  handoff?: Handoff;
+  closeJob?: CloseJob;
 }
 export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
 export const DEFAULT_DESCRIPTION = 'Coordinate workers, delegate work, and manage shared configuration.';
@@ -35,6 +38,8 @@ export function validateConfig(value: unknown): Config {
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
+    if (a.handoff !== undefined) { if (a.coordinator) fail('handoff is worker-only'); validateHandoff(a.handoff); }
+    if (a.closeJob !== undefined) { if (a.coordinator) fail('closeJob is worker-only'); validateCloseJob(a.closeJob); }
     if (a.dashboardPort !== undefined) {
       if (!a.coordinator) fail('dashboardPort is coordinator-only');
       port(a.dashboardPort);
@@ -133,7 +138,14 @@ export class ConfigStore {
       const projectDirectory = await directory(this.root, values.projectDirectory);
       const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);
-      if (index < 0) c.agents.push(a); else c.agents[index] = a;
+      if (index < 0) c.agents.push(a);
+      else {
+        const old = c.agents[index];
+        if (fencedClose(old.closeJob)) fail('worker close is active or uncertain; configuration is fenced');
+        if (old.handoff) a.handoff = old.handoff;
+        if (old.closeJob) a.closeJob = old.closeJob;
+        c.agents[index] = a;
+      }
     }, assertValid);
   }
 }

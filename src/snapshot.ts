@@ -4,6 +4,7 @@ import path from 'node:path';
 import { validateConfig, type Config } from './config.js';
 import { readWorkerReports, type WorkerReport } from './reports.js';
 import type { WorkerConnection } from './connections.js';
+import { validateHandoff, validateCloseJob, type Handoff, type CloseJob } from './handoff.js';
 import { LOG_DIRECTORY, LOG_FILE_PATTERN, sanitizeObservation, type Observation } from './observability.js';
 
 const CONFIG_BYTES = 1024 * 1024, TAIL_BYTES = 128 * 1024, TOTAL_BYTES = 2 * 1024 * 1024;
@@ -19,6 +20,26 @@ export interface ObservationSnapshot {
   connections?: WorkerConnection[];
   truncated: boolean;
   errors: string[];
+}
+
+/** Public saved context only; reject malformed/private protocol metadata. */
+export function publicCloseMetadata(agent: { handoff?: unknown; closeJob?: unknown }): { handoff?: Handoff; closeJob?: CloseJob } {
+  const result: { handoff?: Handoff; closeJob?: CloseJob } = {};
+  try {
+    if (agent.handoff !== undefined) {
+      validateHandoff(agent.handoff);
+      const { version, summary, updatedAt, jobId } = agent.handoff;
+      result.handoff = { version, summary, updatedAt, jobId };
+    }
+  } catch { /* Invalid optional context is not public evidence. */ }
+  try {
+    if (agent.closeJob !== undefined) {
+      validateCloseJob(agent.closeJob);
+      const { jobId, state, createdAt, updatedAt, deadlineAt, reason } = agent.closeJob;
+      result.closeJob = { jobId, state, createdAt, updatedAt, deadlineAt, ...(reason ? { reason } : {}) };
+    }
+  } catch { /* Never expose arbitrary errors or private protocol fields. */ }
+  return result;
 }
 
 // Only fixed, extension-owned paths are read. Reject symlink/junction components
@@ -65,7 +86,7 @@ export async function readObservationSnapshot(root: string): Promise<Observation
     result.truncated ||= config.agents.length > MAX_AGENTS;
     result.config = { multiplexer: config.multiplexer, agents: config.agents.slice(0, MAX_AGENTS).map(a => ({
       sessionId: a.sessionId, name: a.name, coordinator: a.coordinator, description: a.description,
-      projectDirectory: a.projectDirectory, port: a.port,
+      projectDirectory: a.projectDirectory, port: a.port, ...publicCloseMetadata(a),
     })) };
   } catch { result.errors.push('config_unavailable'); }
   try {

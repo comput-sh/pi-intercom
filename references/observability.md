@@ -4,7 +4,7 @@ Intercom's terminal monitor is a standalone Node/pi-tui process above the coordi
 
 ## Terminal-first monitoring
 
-Coordinator startup checks its saved monitor ownership and either preserves the existing pane or creates one above the coordinator. Workers do not create monitors. The pane is named `Intercom monitor`; its generic label alone is not proof of ownership. Machine-local `monitor-*.json` files record the coordinator/workspace/pane identities and partial-launch state. Uncertain operations are fenced rather than blindly repeated.
+Coordinator startup checks its saved monitor ownership only when the roster contains a worker, and either preserves the existing pane or creates one above the coordinator. An empty roster skips monitor setup; configuring the first worker triggers setup, and retained disconnected workers count. Existing monitor panes are not automatically closed when the roster becomes empty. Worker sessions do not create monitors. Coordinator Pi/Herdr names are preserved rather than overwritten with the internal Coordinator role. The pane is named `Intercom monitor`; its generic label alone is not proof of ownership. Machine-local `monitor-*.json` files record the coordinator/workspace/pane identities and partial-launch state. Uncertain operations are fenced rather than blindly repeated.
 
 The monitor refreshes from disk and performs bounded loopback identity checks, then schedules the next pass approximately three seconds after completion. It never launches model turns or resends messages. Probes do not write config or observation logs; cancelling the monitor aborts in-flight probes. Arrow keys select a worker; Enter toggles its details; Escape closes details before quitting, while q/Ctrl+C always quit the monitor only. Selection follows the worker's session ID across roster reorder. Details show configured responsibility, observations and explicit public worker reports, not inferred task state or approval controls.
 
@@ -58,7 +58,17 @@ Activity phases are `working`, `thinking`, `responding`, `tool`, `idle`. Details
 
 Checks expire to unknown after 30 seconds. Monitor batches rotate to avoid starvation; skipped checks may retain previous unexpired evidence. Saved-port changes/removal invalidate cached checks. Shared classification/sorting preserves config order within connected-or-unknown and disconnected groups. UI selection follows session ID across these order changes.
 
-Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. No automatic close, retry, restart or work assignment occurs.
+Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. Connectivity monitoring never automatically closes, retries, restarts or assigns work. An explicit close request (0.6.0) may separately initiate the handoff workflow described below.
+
+## Public handoff and background pane-close jobs (0.6.0)
+
+`Agent.handoff` saves only `{version, jobId, summary, updatedAt}`; the summary is explicitly public worker-authored context, at most 4000 characters. `Agent.closeJob` stores bounded workflow ID/state/timestamps and a fixed reason. Both remain alongside registration after a close. No PID, private session path, terminal ID or readiness nonce is saved in these public config fields. Config validation rejects extra metadata fields; snapshot/status views explicitly project supported fields. Old saved handoffs may precede a newer failed close job; they are not merged or treated as current acceptance.
+
+Explicit `close_worker` returns acceptance while the coordinator extension continues in the background. It requests a correlated handoff, awaits atomic config-save acknowledgment, then requires a successful exact report tool-result ID in the current branch plus final `agent_settled`. The adapter reads only tool-result metadata (role, toolCallId, isError), never arguments, results or reasoning content. New input/agent starts invalidate readiness. No model polling on the coordinator is required.
+
+Closing intent is durable before mutation. After final Linux Herdr pane/session/PID/start-identity checks, a nonce-bound worker commit is checked immediately before one pane-close command. No summary alone, timeout, save failure or busy/stale worker permits a close. Job deadlines are checked again at config publication and before pane mutation. Failed/uncertain outcomes preserve registration/handoff. Interrupted jobs are not replayed after reload; closing intent recovers as uncertain.
+
+The monitor and JSON status expose public handoff age and close workflow separately from connectivity/activity/reports. `closed` means this workflow verified pane absence and original worker-process exit; it does not certify all descendants terminated. The workflow is available in 0.6.0 for Linux Herdr only. See README for retained race/flush limits and operator recovery requirements.
 
 ## Read-only JSON status
 
@@ -81,7 +91,7 @@ Readers consider only configured workers, at most 256 IDs and 8 KiB per file. Un
 - `agent_settled` supplies the idle boundary, not `agent_end`. Activity observations are not availability guarantees or assignment states.
 - `status.received` describes the reporting peer, not the event writer's own activity. It is not used as the writer's status.
 - Launch submission does not establish readiness. A correlation ID is not deduplication or a reply promise.
-- Stop/close remain disabled. Monitoring adds no cancellation, recovery, retries, commit or rollback.
+- Graceful stop remains disabled. The explicit handoff-and-pane-close workflow is separate from monitoring; monitoring adds no cancellation, recovery, retries, commit or rollback.
 
 ## Storage bounds and failure behavior
 

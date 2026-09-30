@@ -7,6 +7,7 @@ import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { launchers } from './launcher.js';
 import { ensureMonitorPane } from './monitor-launcher.js';
 import { createActivityTracker } from './activity.js';
+import { createCloseProvider } from './pane-close.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
 const tools: [string, string, TSchema][] = [
@@ -20,9 +21,10 @@ const tools: [string, string, TSchema][] = [
   ['report_work', 'Configured, responsibility-loaded workers only. Store one public report (blocked, needs_decision, ready_for_review) and notify the coordinator; clear retires it. Summary required except clear (omit or empty). Never include private reasoning, credentials, raw tool payloads, or secrets. Receipt is not approval, verified completion, or permission for follow-up work.', Type.Object({ status: Type.String({ enum: ['blocked', 'needs_decision', 'ready_for_review', 'clear'] }), summary: Type.Optional(Type.String({ maxLength: 2000 })) })],
   ['report_status', 'Worker only (including anonymous). Send runtime sessionId/port/busy report to coordinator. This is NOT registration and creates no config entry.', Type.Object({})],
   ['stop_worker', UNSUPPORTED_CANCELLATION, to],
-  ['close_worker', UNSUPPORTED_CANCELLATION, to],
+  ['close_worker', 'Coordinator only. Begin a background save-handoff-and-close job for a configured worker in Linux Herdr. Requests a public summary, saves it in config, waits for successful tool persistence and final turn settlement, then attempts one verified pane close. Returns job acceptance, not completion. Registration/session history are retained. Check worker_status/list for closeJob; failure/timeout/uncertainty never authorizes retry. Not graceful abort or an all-descendants termination guarantee; Windows/non-Herdr unsupported.', to],
+  ['report_handoff', 'Configured worker only, in response to its pending close request. Submit the matching jobId and concise public resume handoff (current work, completed work, unfinished items, blockers, next step). Never include secrets, private reasoning or raw tool payloads. Saved receipt is not closure: finish the response and wait; the extension requires final turn settlement before pane closure.', Type.Object({ jobId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 4000 }) })],
   ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
-  ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Stop/close are disabled on current host: arrange explicit user closure first.', to],
+  ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Retain registration to resume it later; remove only to forget it. Pending or uncertain close jobs block removal.', to],
   ['set_multiplexer', 'Coordinator only. Set herdr (default, Windows/Linux) or none (separate visible Windows terminals; unsupported on Linux) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
 
@@ -55,6 +57,35 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     extension: fileURLToPath(import.meta.url),
     sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
   });
+  let monitorTask: { runtime: Intercom; generation: number; dirty: boolean; promise: Promise<void> } | undefined;
+  async function ensureCoordinatorMonitor(current: Intercom, ctx: ExtensionContext, started: number): Promise<void> {
+    const isCurrent = () => started === generation && runtime === current;
+    if (!isCurrent()) return;
+    if (monitorTask?.runtime === current && monitorTask.generation === started) {
+      monitorTask.dirty = true;
+      return monitorTask.promise;
+    }
+    const check = async () => {
+      try {
+        const { config, me, id } = await current.state();
+        if (!isCurrent() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator)) return;
+        const monitor = await ensureMonitorPane({
+          root: current.store.root, sessionId: id,
+          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
+          assertCurrent: () => { if (!isCurrent()) throw new Error('Coordinator session changed'); },
+        });
+        if (isCurrent()) ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
+      } catch (error) {
+        if (isCurrent()) ctx.ui.notify(String(error), 'warning');
+      }
+    };
+    const task = { runtime: current, generation: started, dirty: false, promise: Promise.resolve() };
+    monitorTask = task;
+    task.promise = (async () => {
+      do { task.dirty = false; await check(); } while (task.dirty && isCurrent());
+    })();
+    try { await task.promise; } finally { if (monitorTask === task) monitorTask = undefined; }
+  }
   pi.on('session_start', async (_event, ctx) => {
     const started = ++generation;
     activity.reset();
@@ -74,7 +105,13 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       deliver: content => pi.sendUserMessage(content, { deliverAs: 'steer' }),
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
       notify: text => ctx.ui.notify(text, 'info'),
-    }, { launch: launcher.launch, store: root => new PiConfigStore(root) });
+    }, {
+      launch: launcher.launch, store: root => new PiConfigStore(root),
+      closeProvider: createCloseProvider({
+        sessionId: () => context!.sessionManager.getSessionId(),
+        sessionFile: () => context!.sessionManager.getSessionFile(),
+      }),
+    });
     const current = runtime;
     try { await current.start(); }
     catch (e) { if (runtime === current) runtime = undefined; ctx.ui.notify(String(e), 'error'); return; }
@@ -87,13 +124,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(`Legacy dashboard metadata cleanup failed; messaging remains available: ${String(error)}`, 'warning');
         }
         if (started !== generation) return;
-        const monitor = await ensureMonitorPane({
-          root: current.store.root, sessionId: ctx.sessionManager.getSessionId(),
-          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
-          assertCurrent: () => { if (started !== generation || runtime !== current) throw new Error('Coordinator session changed'); },
-        });
-        if (started !== generation) return;
-        ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
+        await ensureCoordinatorMonitor(current, ctx, started);
       }
     } catch (error) {
       if (started !== generation) return;
@@ -107,8 +138,13 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     runtime = undefined; context = undefined;
     await oldRuntime?.close();
   });
+  pi.on('input', (_event, ctx) => {
+    context = ctx;
+    runtime?.workerStarted(); // New owner input invalidates a pending close-readiness epoch.
+  });
   pi.on('agent_start', async (_event, ctx) => {
     context = ctx;
+    runtime?.workerStarted();
     activityOutcome = 'started';
     try { activity.start(); } finally { activityOutcome = 'snapshot'; }
   });
@@ -116,6 +152,15 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     context = ctx;
     activityOutcome = 'settled';
     try { activity.settled(); } finally { activityOutcome = 'snapshot'; }
+    // Settlement is notification-only and follows tool-result persistence. Inspect
+    // only entry kinds and successful tool call IDs, never message/reasoning bodies.
+    const successful = new Set<string>();
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === 'message' && entry.message.role === 'toolResult' && !entry.message.isError) {
+        successful.add(entry.message.toolCallId);
+      }
+    }
+    runtime?.workerSettled(successful);
   });
   pi.on('message_update', (event, ctx) => {
     context = ctx;
@@ -135,7 +180,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     if (!runtime) return;
     const { me } = await runtime.state();
     const loaded = runtime.responsibility;
-    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker/close_worker are disabled due to host cancellation blocker.\n' + (me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
+    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After assigned work, report as instructed and wait; do not autonomously exit. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
   });
   for (const [operation, description, parameters] of tools) {
     pi.registerTool({
@@ -143,9 +188,11 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       async execute(_id, args, signal, _update, ctx) {
         signal?.throwIfAborted(); context = ctx;
         if (!runtime) throw new Error('PiIntercom not initialized; inspect startup error.');
-        const result = await runtime.tool(operation, args as Record<string, unknown>);
+        const current = runtime, started = generation;
+        const result = await current.tool(operation, args as Record<string, unknown>, _id);
+        if (operation === 'configure_worker') await ensureCoordinatorMonitor(current, ctx, started);
         const output = truncateHead(JSON.stringify(result, null, 2));
-        return { content: [{ type: 'text', text: output.content + (output.truncated ? `\n[Truncated; full shared configuration: ${runtime.store.file}]` : '') }], details: {} };
+        return { content: [{ type: 'text', text: output.content + (output.truncated ? `\n[Truncated; full shared configuration: ${current.store.file}]` : '') }], details: {} };
       },
     });
   }

@@ -131,6 +131,42 @@ test('equal-time contradictory observations remain unknown', () => {
   assert.match(renderMonitor(s, 100, 10, now).join('\n'), /Builder\s+unknown\s+—\s+unknown\s+3s ago.*conflicting records/);
 });
 
+test('saved handoff and uncertain or failed close workflow are separate public details', () => {
+  const s = snapshot();
+  s.config.agents[0].handoff = { version: 1, jobId: 'previous-job', summary: 'Review the remaining tests before resuming', updatedAt: new Date(now - 120000).toISOString() };
+  s.reports = [report('blocked', 'Awaiting a decision')];
+  for (const [state, reason] of [['uncertain', 'close_unverified'], ['failed', 'close_failed']]) {
+    s.config.agents[0].closeJob = { jobId: 'latest-job', state, reason, createdAt: new Date(now - 10000).toISOString(), updatedAt: new Date(now - 1000).toISOString(), deadlineAt: new Date(now + 10000).toISOString() };
+    const text = renderMonitor(s, 140, 30, now, false, { selectedIndex: 0, details: true }).join('\n');
+    assert.ok(text.includes(`Close workflow: ${state} · ${reason} · 1s ago`));
+    assert.match(text, /Saved handoff \(public\): 2m ago \(old\)/);
+    assert.match(text, /Handoff: Review the remaining tests before resuming/);
+    assert.ok(text.includes(`Handoff saved: ${s.config.agents[0].handoff.updatedAt}`));
+    assert.match(text, /Report: Blocked · 3s ago/);
+    assert.match(text, /Observed status: working · 3s ago/);
+    assert.match(text, /Connection: unknown/);
+    assert.match(text, /Workflow state is not proof all child processes terminated/);
+    assert.doesNotMatch(text, /approved|task completed/i);
+  }
+  delete s.config.agents[0].handoff;
+  assert.match(renderMonitor(s, 100, 18, now, false, { selectedIndex: 0, details: true }).join('\n'), /Saved handoff: none/);
+});
+test('handoff summary is sanitized, wrapped and bounded without consuming footer', () => {
+  const s = snapshot();
+  s.config.agents[0].handoff = { version: 1, jobId: 'job-1', summary: '\x1b]52;c;SECRET\x07\u202e界👩‍💻\n' + 'Public context '.repeat(100), updatedAt: new Date(now + 1000).toISOString() };
+  for (const color of [false, true]) for (const width of [1, 6, 20, 40, 60, 140]) for (const height of [1, 3, 8, 12, 30]) {
+    const lines = renderMonitor(s, width, height, now, color, { selectedIndex: 0, details: true });
+    assert.equal(lines.length, height);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    const plain = lines.map(stripVTControlCharacters);
+    assert.doesNotMatch(plain.join(''), /SECRET|[\x00-\x1f\x7f-\x9f\u202e]/);
+    assert.ok(plain.at(-1).includes(width < 6 ? 'q' : 'q quit'));
+  }
+  const text = renderMonitor(s, 100, 30, now, false, { selectedIndex: 0, details: true }).join('\n');
+  assert.match(text, /Saved handoff \(public\): clock uncertain/);
+  assert.match(text, /Public context/);
+});
+
 test('footer reserves a right-aligned runtime version with safe tiny-pane quit hints', () => {
   const version = `v${INTERCOM_VERSION}`;
   for (const s of [undefined, snapshot(), { ...snapshot(), truncated: true, reports: [report('blocked')] }]) {

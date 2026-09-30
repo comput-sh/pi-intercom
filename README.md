@@ -25,6 +25,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 > **0.4.1:** The terminal monitor replaces the browser dashboard. Public worker reports and the read-only JSON worker-status tool keep coordinator decisions separate from observed activity.
 >
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
+>
+> **0.6.0:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
 
@@ -64,7 +66,7 @@ Open Pi inside a Herdr workspace at the project root you want to coordinate, or 
 
 ### Know the boundaries
 
-- **Stop/close tools are disabled.** Close workers explicitly in their terminals. Pi 0.84.4's cancellation behavior leaves retry continuations alive; newer versions are not assumed safe without verification. See the [cancellation blocker](references/implementation-blocker.md).
+- **Graceful stop remains disabled.** Pi 0.84.4's cancellation behavior leaves retry continuations alive; newer versions are not assumed safe without verification. The Linux Herdr `close_worker` in 0.6.0 has a different contract: request/save a handoff, await final settlement, then attempt an identity-checked external pane close. It does not use Pi abort/shutdown or promise all descendants terminate. Manual closure remains available. See the [cancellation blocker](references/implementation-blocker.md).
 - **No silent recovery.** Intercom does not automatically retry messages, replace workers, switch launchers, commit changes, or roll them back.
 - **Local, not remote.** Messaging binds to loopback. Local processes are trusted; this is not an authenticated service for untrusted clients.
 
@@ -94,7 +96,7 @@ Replace the final path with your checkout's absolute path (use a Windows path on
 
 Run Pi `/reload` (or start a new interactive session) after installing or changing source; reload workers too when changing their extension code. A standalone monitor already running in its pane needs an explicit restart to load rebuilt display code. Linux supports messaging, configuration, the terminal monitor, and Herdr worker launch/resume. Launch the coordinator inside a Herdr workspace; `herdr`, `sh`, and `pi` must be on PATH in worker panes. Workers run a quoted POSIX shell command in the returned pane, with the coordinator's actual extension path. Project trust remains required.
 
-Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headless fallback, or automatic cleanup. Stop/close remain disabled on both platforms. Automated Linux tests cover shell argument preservation and adapter/HTTP behavior. A live source-loaded Linux Herdr smoke test launched two workers: both registered, loaded their configured names/responsibilities, and acknowledged coordinator messages through Intercom. This verifies launch and round-trip messaging, not resume or cancellation.
+Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headless fallback, or automatic cleanup. Graceful stop remains disabled on both platforms; external pane closure is Linux Herdr only. Automated Linux tests cover shell argument preservation and adapter/HTTP behavior. A live source-loaded Linux Herdr smoke test launched two workers: both registered, loaded their configured names/responsibilities, and acknowledged coordinator messages through Intercom. This verifies launch and round-trip messaging, not resume or cancellation.
 
 ### Startup and launchers
 
@@ -115,7 +117,7 @@ Existing workers restore responsibility by session ID, bind their saved port or,
 
 ## Tools and permissions
 
-Every tool rereads current config and checks the live Pi session ID. Names are case-insensitive for lookup/uniqueness; display capitalization is preserved. `Coordinator` is reserved.
+Every tool rereads current config and checks the live Pi session ID. Names are case-insensitive for lookup/uniqueness; display capitalization is preserved. `Coordinator` is reserved for internal configuration/routing. The coordinator's existing Pi session name and Herdr tab title are preserved; only worker sessions are synchronized to their configured names.
 
 | Tool | Arguments | Permission / effect |
 |---|---|---|
@@ -128,12 +130,14 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
 | `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator, never approve/complete work |
-| `intercom_stop_worker`, `intercom_close_worker` | `to` (worker name) | Coordinator role checked, then **unsupported-host error**, no side effects |
+| `intercom_stop_worker` | `to` | Unsupported graceful cancellation; no side effects |
+| `intercom_close_worker` | `to` | Linux Herdr coordinator; request background handoff/save/settle/pane-close job, retain registration |
+| `intercom_report_handoff` | `jobId`, `summary` | Requested worker only; save concise public handoff, then finish the turn and wait |
 | `intercom_resume_worker` | `to`, `confirmClosed` | Coordinator; user-confirmed old-session closure, saved session/launcher/directory, guarded launch |
 | `intercom_remove_worker` | `to` (worker name) | Coordinator; config entry only, no shutdown/session deletion |
 | `intercom_set_multiplexer` | `multiplexer`: `herdr` or `none` | Coordinator; future launches only |
 
-**Removal precondition:** explicitly close a running worker before removing its entry. Since remote close is disabled, arrange explicit user closure in its terminal first. Intercom does not infer liveness from saved IDs/ports and cannot certify closure. No hidden probing or force-kill is performed.
+**Removal precondition:** close a running worker before removing its entry. Removal forgets the registration; it is not how to park a worker for later resume. Active/uncertain close jobs fence removal and other lifecycle/work operations. Saved IDs/ports alone do not prove closure; no force-kill fallback occurs.
 
 Anonymous `send`/`list` and all coordinator operations fail explicitly. Anonymous registration and status remain available. A dedicated repeat-registration operation and broader anonymous permissions remain **unresolved contract TODOs**, not silently added tools. If initial registration fails, the worker remains reachable and reports the error locally. Explicit user Pi `/reload` restarts this extension and repeats startup registration; status is not a substitute and there is no automatic retry.
 
@@ -168,7 +172,9 @@ HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 K
 {"version":1,"kind":"message","from":"sender-session-id","to":"expected-recipient-session-id","payload":{"message":"explicit message"}}
 ```
 
-Kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
+Handoff wire kinds (0.6.0): `close_prepare`, `close_identity`, `close_request`, `handoff_report`, `close_ready`, `close_commit`. These require configured roles, matching job/runtime identity and bounded validated payloads. Pane/process identity is ephemeral protocol data, never stored in public config or summaries.
+
+Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
 
 `202 {"accepted":true}` means Intercom extension receipt/dispatch, **not guaranteed Pi input acceptance, queueing, or model completion**. In Pi 0.84.4, `sendUserMessage` can reject during manual compaction after Intercom has acknowledged receipt: its void extension API reports the asynchronous rejection only as a local host error. Intercom has no delivery queue or retry to repair this gap; inspect the recipient's local error and arrange an explicit resend after compaction if needed. Replacing it with `sendMessage` is not a safe workaround because that path can start a concurrent run. Invalid/unsupported requests return an error; excessive bodies return 413. Request-status sends its report separately after accepting control. Starting in 0.2.1, Intercom always supplies `deliverAs: 'steer'`: Pi starts normally when idle and steers when busy. This avoids the idle-snapshot-to-busy race that caused “Agent is already processing” errors; it does not fix manual-compaction rejection. It does not hard-interrupt an executing tool. Each send resolves the recipient again from config; 5-second receipt deadline, **no retries**. Timeout means unknown outcome, not proof of nondelivery. No durable inbox, deduplication or replay log in V1.
 
@@ -178,7 +184,7 @@ Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains 
 
 ## Standalone terminal status monitor
 
-The coordinator automatically checks for its monitor pane on startup inside Herdr. If missing, it creates a small pane **above the coordinator**, preserving coordinator focus. This is a standalone Node/pi-tui program, **not another Pi instance**. The old inline widget implementation has been removed. Source installations must run `npm run build` before reloading Pi; published packages include the compiled `dist/monitor.js` entry.
+When at least one worker is registered, the coordinator automatically checks for its monitor pane on startup inside Herdr. If missing, it creates a small pane **above the coordinator**, preserving coordinator focus. With no workers, it does not create/check the monitor. Configuring the first worker triggers the check; disconnected saved workers still count. This does not automatically close an already-existing monitor when the final worker is removed. This is a standalone Node/pi-tui program, **not another Pi instance**. The old inline widget implementation has been removed. Source installations must run `npm run build` before reloading Pi; published packages include the compiled `dist/monitor.js` entry.
 
 The table uses aligned **Worker | Connection | Report | Activity | Seen | Last activity** columns (activity age/detail give way first on narrow panes). Report is explicitly worker-authored and separate from host activity. Activity is the last reported `working`, `thinking`, `idle`, `closed`, or `unknown` state. Seen marks evidence older than 60 seconds with `(old)`; this is not a live connection indicator. Last activity uses fixed public labels such as Reading files, Running command or Writing response and can persist after the worker settles. Recent working/thinking/idle observations use restrained colors; old evidence remains neutral and explicitly marked. `NO_COLOR` disables styling. Version 0.5.2 adds a small footer label for the Intercom package version loaded by the monitor at startup; restart the monitor after updating to load the new version. Narrow panes use a compact version label and preserve the quit hint. No read-only banner or busy/idle count summary is shown. It reads the bounded config/log snapshot and performs read-only loopback health checks, then refreshes roughly three seconds after completion, without worker prompts or model calls. Checks are bounded by 750 ms per endpoint, a four-second batch budget, 16 concurrent requests and 256 workers; no overlapping batches or retries. Closing the monitor aborts checks. Only observed activity is shown, not inferred assignments/completion. Evidence over 60 seconds old is stale; missing evidence is unknown. The number of worker rows adapts to the pane height, with an omitted count when needed. The display is clipped to pane dimensions. In the monitor pane, use **↑/↓** to select a worker and **Enter** to toggle its details (configured responsibility and observed status). Selection follows the worker across roster reorder and scrolls the visible window. **Escape** closes details first, then quits; **q** or **Ctrl+C** always quits only the display process, never agents or their panes.
 
@@ -196,7 +202,24 @@ Connection is separate from historical activity and public reports. A recent mat
 
 After the user confirms the previous session is closed, call `intercom_resume_worker({ to: "Builder", confirmClosed: true })`. It launches the **same saved Pi session**, restores configured identity/responsibility, and does not automatically start an old assignment. A matching connected endpoint blocks resume. Concurrent/submitted/uncertain attempts are fenced locally until a subsequent configured worker status arrives. On uncertain launch with no status, inspect the actual worker process; only after verifying closure should you reload the coordinator and consider an explicit retry. The fence is not persistent or a cross-process uniqueness guarantee. Resume failures do not remove/replace saved identity.
 
-`intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Automatic stop/close remains disabled. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.1.
+`intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Graceful stop remains disabled; see the background close workflow below. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.1.
+
+### Background save-and-close (0.6.0)
+
+On supported **Linux + Herdr**, `intercom_close_worker({to:"Builder"})` returns a persisted job ID/state promptly. It does not hold the coordinator model turn open waiting for the worker. The extension performs these steps in the background:
+
+1. Obtain and independently verify the worker's current pane, session header, terminal identity and Linux PID/start identity. Never infer ownership from a title/name alone.
+2. Ask that worker to call `intercom_report_handoff({jobId,summary})` with a concise public summary (up to 4000 characters): completed work, unfinished items, blockers, validation and relevant project files. No credentials, private reasoning, raw tool output or private session paths.
+3. Save `Agent.handoff` and `Agent.closeJob` atomically in config; only then acknowledge the worker's report tool. No pane closes at this step.
+4. Wait for a successful matching tool result in the current branch and the worker's final `agent_settled` notification. New input/activity invalidates readiness.
+5. Persist closing intent, recheck pane identity, and make a final nonce-bound worker settlement challenge immediately before issuing one exact `herdr pane close` command.
+6. Observe pane absence and the original worker process's exit. Record `closed` only when both are verified; otherwise retain an explicit failure/uncertainty state. Name, responsibility, session ID and saved handoff remain registered.
+
+The latest handoff/job are visible in `intercom_list`, bounded `intercom_worker_status` JSON and monitor details—even while the worker is disconnected. A handoff is worker-authored context, not acceptance of its findings. Config may be source-controlled: keep these summaries non-secret.
+
+Jobs have a 120-second deadline and at most 16 simultaneous coordinator jobs. Unsupported hosts, missing identity, missing summary, save failure or absent final settlement never authorize a pane close. Old workers must reload the updated extension first. Active/uncertain jobs fence new Intercom work and conflicting lifecycle/config changes. On coordinator reload, pending jobs become interrupted and closing intent becomes uncertain; no job is automatically replayed. An uncertain persisted job requires explicit operator inspection/recovery of config before a new close/resume/removal—do not erase its fence or retry blindly.
+
+**Scope of guarantees:** this is external pane closure, not graceful Pi cancellation. Herdr's pane-ID-only API has no atomic compare-and-close operation; independent local/Telegram input or pane replacement can still race the final check. No guarantee covers escaped child processes or transcript fsync/power-loss durability. Windows/non-Herdr close is unsupported. A disposable ordinary Node process was verified to exit on pane closure in local Linux Herdr 0.9.1; that is not a full live Pi handoff/history test. No existing project worker was closed during validation.
 
 ### JSON worker status for agents and chat integrations
 
@@ -255,6 +278,15 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.6.0 Background handoff-and-close and quiet startup
+
+- Explicit Linux Herdr close jobs request and save a public worker handoff, await final settlement, then attempt one identity-checked pane close in the background. Worker registration, responsibility and session ID remain saved.
+- Persist latest handoff and close-job status in config; show them in monitor details and JSON worker status. Correlation, deadlines, lifecycle guards and uncertainty fences prevent automatic replay.
+- Empty rosters do not open/check the monitor; configuring the first worker triggers setup. Disconnected saved workers still count.
+- Preserve the coordinator's existing Pi session name and Herdr tab title; worker naming remains synchronized.
+- Local validation: typecheck, 164 tests and isolated package-install check passed. An isolated ordinary-process pane-close check passed on Linux Herdr 0.9.1; full live Pi handoff/history and Windows pane termination are not claimed.
+- Upgrade coordinator/workers and restart the monitor. Close is Linux Herdr only, not graceful Pi abort or an all-descendants termination guarantee. Config-root discovery and connectivity polling architecture are unchanged.
 
 ### 0.5.2 Monitor version footer
 
@@ -344,5 +376,5 @@ The release/session evidence reported during the 0.1.2 validation establishes th
 - Windows visible terminal/Pi process startup. Success only proves terminal creation, **not Pi readiness**; startup failures remain visible in that terminal. No live readiness handshake was added.
 - Actual persisted-session lookup and resumed worker startup; never-used session failure.
 - Cross-process/network-drive atomicity and Windows ACL/sharing failures (same-process temp-filesystem races are tested).
-- Stop/close remain disabled on all hosts until a verified cancellation API covers retries, compaction continuations and queues. No workaround or weakened guarantee.
+- Graceful stop remains disabled until a verified cancellation API covers retries, compaction continuations and queues. The Linux Herdr pane-close workflow is a separately authorized best-effort contract, not a claim that graceful cancellation was fixed.
 - Explicit repeat-registration tool and broad anonymous permissions require a contract decision. Duplicate-session locks, takeover, durable logging, non-Herdr Linux launchers and macOS support are deferred.

@@ -48,7 +48,12 @@ async function configured(t) {
 }
 test('anonymous registration explicitly hands ID/port/directory to agent, configure writes only, reload passive', async t => {
   const f = await setup(t), c = await f.start('c');
-  assert.equal(c.messages.length, 0); assert.deepEqual(c.names, ['Coordinator']);
+  assert.equal(c.messages.length, 0); assert.deepEqual(c.names, []);
+  assert.equal(c.runtime.responsibility.name, 'Coordinator');
+  c.host.setName = async () => assert.fail('coordinator reload must preserve the existing host title');
+  await c.runtime.reload();
+  assert.equal(c.runtime.responsibility.name, 'Coordinator');
+  assert.deepEqual(c.names, []);
   c.host.busy = () => true;
   const w = await f.start('w');
   assert.equal(c.messages.length, 1); assert.equal(c.messages[0].busy, true);
@@ -173,7 +178,7 @@ test('recipient and control role validation; stop/close fail before any transpor
   await assert.rejects(w.runtime.receive({ version: 1, kind: 'reload', from: 'w', to: 'w', payload: {} }), /coordinator sender/);
   for (const op of ['stop_worker', 'close_worker']) {
     const before = wire.length;
-    await assert.rejects(c.runtime.tool(op, { to: 'Builder' }), /Unsupported Pi host/);
+    await assert.rejects(c.runtime.tool(op, { to: 'Builder' }), op === 'stop_worker' ? /Unsupported Pi host/ : /supported Linux Herdr provider/);
     assert.equal(wire.length, before);
   }
   for (const kind of ['stop', 'close']) await assert.rejects(w.runtime.receive({ version: 1, kind, from: 'c', to: 'w', payload: {} }), /No cancellation or shutdown/);
@@ -192,12 +197,13 @@ test('coordinator unavailable leaves endpoint open; no retries/replacement and s
   await assert.rejects(w.runtime.tool('list', {}), /inactive/);
 });
 test('resume, launcher setting and explicit removal do not orchestrate other actions', async t => {
-  const { c, w, launches } = await configured(t);
+  const { c, w, launches, start } = await configured(t);
   await c.runtime.tool('set_multiplexer', { multiplexer: 'none' });
   await w.runtime.close();
   await c.runtime.tool('resume_worker', { to: 'Builder', confirmClosed: true });
   assert.equal(launches.at(-1).sessionId, 'w'); assert.equal(launches.at(-1).multiplexer, 'none');
-  await w.runtime.close();
+  const resumed = await start('w'); // Real status announcement clears the in-flight resume fence.
+  await resumed.runtime.close();
   await c.runtime.tool('remove_worker', { to: 'Builder' });
   assert.equal((await c.runtime.store.read()).agents.length, 1);
 });

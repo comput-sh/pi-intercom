@@ -1,6 +1,6 @@
 import { stripVTControlCharacters } from 'node:util';
 import { truncateToWidth, visibleWidth } from 'pi-intercom-tui';
-import type { ObservationSnapshot } from './snapshot.js';
+import { publicCloseMetadata, type ObservationSnapshot } from './snapshot.js';
 import { workerObservation } from './worker-status.js';
 import { currentConnection, sortWorkersByConnection } from './connections.js';
 import { INTERCOM_VERSION } from './version.js';
@@ -74,7 +74,9 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
     const selectedIndex = Math.min(workers.length - 1, Math.max(-1, options.selectedIndex ?? -1));
     const showDetails = Boolean(options.details && selectedIndex >= 0 && height >= 8);
     const selectedReport = snapshot.reports?.find(report => report.sessionId === workers[selectedIndex]?.sessionId && reportLabels[report.status]);
-    const detailBudget = showDetails ? Math.min(selectedReport ? 15 : 8, height - 5) : 0;
+    const selectedSaved = workers[selectedIndex] ? publicCloseMetadata(workers[selectedIndex]) : {};
+    const hasSaved = !!(selectedSaved.handoff || selectedSaved.closeJob);
+    const detailBudget = showDetails ? Math.min(hasSaved ? 22 : selectedReport ? 15 : 8, height - 5) : 0;
     const available = Math.max(0, height - lines.length - 2 - detailBudget);
     const needsOverflow = workers.length > available;
     const count = Math.min(workers.length, Math.max(0, available - (needsOverflow && available > 1 ? 1 : 0)));
@@ -94,7 +96,32 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
       const selected = start + offset === selectedIndex;
       const report = snapshot.reports?.find(report => report.sessionId === worker.sessionId && reportLabels[report.status]);
       lines.push(table(worker.name, connection.state, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected));
-      if (selected && showDetails && report) {
+      if (selected && showDetails && hasSaved) {
+        const savedAge = (timestamp: string) => {
+          const elapsed = now - Date.parse(timestamp);
+          return elapsed < 0 || !Number.isFinite(elapsed) ? 'clock uncertain' : ageLabel(elapsed) + (elapsed > snapshot.staleAfterMs ? ' (old)' : '');
+        };
+        const { handoff, closeJob } = selectedSaved;
+        const context = [
+          ...(closeJob ? [line(`  Close workflow: ${closeJob.state}${closeJob.reason ? ` · ${closeJob.reason}` : ''} · ${savedAge(closeJob.updatedAt)}`)] : []),
+          line(handoff ? `  Saved handoff (public): ${savedAge(handoff.updatedAt)}` : '  Saved handoff: none'),
+        ];
+        selectedDetail = [
+          ...context,
+          ...(handoff ? wrapSummary(`Handoff: ${handoff.summary}`, Math.max(0, width - 2), Math.min(4, Math.max(0, detailBudget - context.length))).map(text => line(`  ${text}`)) : []),
+          ...(handoff ? [line(`  Handoff saved: ${handoff.updatedAt}`)] : []),
+          ...(report ? [
+            line(`  Report: ${reportLabels[report.status]} · ${savedAge(report.updatedAt)}`),
+            line('  Self-reported, pending review'),
+            ...wrapSummary(`Summary: ${report.summary}`, Math.max(0, width - 2), 2).map(text => line(`  ${text}`)),
+          ] : []),
+          ...connectionDetails,
+          line(`  Responsibility: ${worker.description || 'Not specified'}`),
+          line(`  Observed status: ${activity} · ${age}`),
+          line(`  Last activity: ${evidence}`),
+          ...(closeJob ? [line(`  Close updated: ${closeJob.updatedAt}`), line('  Workflow state is not proof all child processes terminated')] : []),
+        ];
+      } else if (selected && showDetails && report) {
         const elapsed = now - Date.parse(report.updatedAt);
         const reportAge = !Number.isFinite(elapsed) || elapsed < 0 ? 'clock uncertain' : ageLabel(elapsed) + (elapsed > snapshot.staleAfterMs ? ' (old)' : '');
         const contextRows = detailBudget >= 8 ? [
