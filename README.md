@@ -282,7 +282,7 @@ Published versions are immutable. For a new release, bump package and lockfile v
 ### 0.6.1 Background handoff-and-close and quiet startup
 
 - First npm release of these features: the preserved 0.6.0 GitHub tag failed Windows validation and was not published to npm.
-- Windows config publication handles transient `EPERM` replacement failures with bounded filesystem-only attempts and lifecycle/deadline checks before each attempt. Worker close commands, messages and jobs are never retried by this safeguard.
+- Windows config publication handles transient `EPERM` replacement failures with bounded filesystem-only attempts and lifecycle/deadline checks before each attempt. Worker close commands, messages and jobs are never retried by this safeguard. Persistent contention can still prevent publication; an unpersisted terminal close outcome retains the existing intent/fence for operator inspection and reload recovery.
 
 - Explicit Linux Herdr close jobs request and save a public worker handoff, await final settlement, then attempt one identity-checked pane close in the background. Worker registration, responsibility and session ID remain saved.
 - Persist latest handoff and close-job status in config; show them in monitor details and JSON worker status. Correlation, deadlines, lifecycle guards and uncertainty fences prevent automatic replay.

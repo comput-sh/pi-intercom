@@ -4,7 +4,7 @@ import { mkdtemp, rm, rename, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
-import { ConfigStore } from '../dist/config.js';
+import { ConfigStore, validateConfig } from '../dist/config.js';
 import { readWorkerReports } from '../dist/reports.js';
 import { readObservationSnapshot } from '../dist/snapshot.js';
 import { envelope } from '../dist/transport.js';
@@ -139,6 +139,47 @@ test('publication retry elapsed budget prevents another rename after an overslep
   });
   await assert.rejects(f.store.update('c', f.mutate), error => error === failure);
   assert.equal(attempts, 1); assert.equal(delays, 1); await f.assertOriginalAndClean();
+});
+
+test('real concurrent config readers see complete files; publication succeeds or fails conservatively on Windows contention', { timeout: 10000 }, async t => {
+  const f = await publicationFixture(t, {}); // Real filesystem rename and platform, no retry injection.
+  const original = await f.store.read();
+  const updated = structuredClone(original); updated.agents[0].description = 'updated';
+  const abort = new AbortController();
+  let stopped = false, reads = 0, readerError, updateError, firstRead;
+  const started = new Promise(resolve => { firstRead = resolve; });
+  const readerDeadline = performance.now() + 5000;
+  const reader = (async () => {
+    try {
+      while (!stopped && reads < 2000 && performance.now() < readerDeadline) {
+        let contents;
+        try { contents = await readFile(f.store.file, { encoding: 'utf8', signal: abort.signal }); }
+        catch (error) { if (stopped && error.code === 'ABORT_ERR') return; throw error; }
+        const config = validateConfig(JSON.parse(contents));
+        assert.deepEqual(config, config.agents[0].description === 'updated' ? updated : original);
+        reads++; firstRead();
+      }
+    } catch (error) { readerError = error; firstRead(); }
+  })();
+  const readerTimer = setTimeout(() => { stopped = true; abort.abort(); firstRead(); }, 5000);
+  try {
+    await started;
+    assert.equal(readerError, undefined);
+    try { await f.store.update('c', f.mutate); } catch (error) { updateError = error; }
+  } finally {
+    clearTimeout(readerTimer); stopped = true; abort.abort(); await reader;
+  }
+  assert.equal(readerError, undefined); assert.ok(reads > 0);
+  if (updateError) {
+    assert.equal(process.platform, 'win32', 'other platforms must not gain a tolerated failure');
+    assert.equal(updateError.code, 'EPERM'); assert.equal(updateError.syscall, 'rename');
+    await f.assertOriginalAndClean();
+  } else {
+    assert.deepEqual(await f.store.read(), updated);
+    assert.deepEqual(await readdir(path.dirname(f.store.file)), ['config.json']);
+  }
+  // Exact attempt/budget bounds are asserted in the deterministic tests above;
+  // this test makes no availability promise under real continuous contention.
 });
 
 test('a distinct non-EPERM during retry immediately propagates without further attempts', async t => {

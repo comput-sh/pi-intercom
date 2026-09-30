@@ -23,12 +23,12 @@ async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-handoff-'));
   await new ConfigStore(root).initialize('c', 12345);
   const wire = [], deliveries = [], closes = [], inspections = [];
-  const updates = [];
-  let lastReadState = null, firstUpdateFailure = null, busy = false;
+  const updates = [], publicationListeners = new Set(), pendingWaits = new Set();
+  let lastPublishedJob = null, lastReadState = null, firstUpdateFailure = null, busy = false;
   const recordUpdate = event => { updates.push(event); if (updates.length > 24) updates.shift(); };
   const diagnostics = () => {
     const pending = c.handoff?.jobs.get('w'); // Test-only visibility into the retained failure fence.
-    return { lastReadState, firstUpdateFailure, updates, wireKinds: wire.slice(-16).map(message => message.kind), closeCalls: closes.length,
+    return { lastReadState, lastPublishedState: lastPublishedJob?.state ?? null, firstUpdateFailure, updates, wireKinds: wire.slice(-16).map(message => message.kind), closeCalls: closes.length,
       runtimeJob: pending ? { state: pending.job.state, ended: pending.ended, closing: pending.closing } : null };
   };
   activeDiagnostics.add(diagnostics);
@@ -58,6 +58,9 @@ async function fixture(t, options = {}) {
         recordUpdate({ stage: 'mutated', state: attemptedState });
       }, guard);
       recordUpdate({ stage: 'published', state: attemptedState });
+      const job = result.agents.find(agent => agent.sessionId === 'w')?.closeJob;
+      lastPublishedJob = job ? { ...job } : null;
+      for (const notify of [...publicationListeners]) notify();
       return result;
     } catch (error) {
       const failure = { stage: 'rejected', state: attemptedState, code: typeof error.code === 'string' ? error.code.slice(0, 64) : null,
@@ -75,10 +78,33 @@ async function fixture(t, options = {}) {
     lastReadState = value?.closeJob ? { state: value.closeJob.state, reason: value.closeJob.reason ?? null } : null;
     return value;
   };
+  const waitForJob = async expectedState => {
+    // Observe real successful publication, not repeated file opens that impose
+    // an unrelated Windows continuous-reader availability requirement.
+    const published = await new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => { clearTimeout(timer); publicationListeners.delete(check); pendingWaits.delete(cancel); };
+      const check = () => {
+        if (lastPublishedJob?.state === expectedState) { cleanup(); resolve({ ...lastPublishedJob }); }
+      };
+      const cancel = () => { cleanup(); reject(new Error('fixture ended before job publication')); };
+      publicationListeners.add(check); pendingWaits.add(cancel);
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`job did not reach ${expectedState}; fixture diagnostics: ${JSON.stringify(diagnostics()).slice(0, 12000)}`));
+      }, 3000);
+      check(); // Subscribe then check the cached publication: no missed event.
+    });
+    const actual = await entry();
+    assert.equal(actual.closeJob.jobId, published.jobId);
+    assert.equal(actual.closeJob.state, expectedState, 'published state must exist in the actual config file');
+    return actual.closeJob;
+  };
+  t.after(() => { for (const cancel of [...pendingWaits]) cancel(); });
   const request = async () => (await c.tool('close_worker', { to: 'Worker' })).job;
   const prepared = async () => until(async () => deliveries.find(d => d.id === 'w' && d.text.includes('intercom_report_handoff')));
   const report = async job => { w.workerStarted(); await w.tool('report_handoff', { jobId: job.jobId, summary: 'Completed tests; pending review. src/runtime.ts' }, 'handoff-tool'); };
-  return { c, w, root, wire, deliveries, closes, inspections, provider, shared, entry, request, prepared, report, setBusy: value => { busy = value; } };
+  return { c, w, root, wire, deliveries, closes, inspections, provider, shared, entry, waitForJob, request, prepared, report, setBusy: value => { busy = value; } };
 }
 
 test('close returns after durable enqueue, not worker response; summary/tool settlement/commit precede one close', async t => {
@@ -97,7 +123,7 @@ test('close returns after durable enqueue, not worker response; summary/tool set
   assert.equal(f.closes.length, 0);
   f.w.workerSettled(new Set(['wrong-tool'])); await pause(); assert.equal(f.closes.length, 0);
   f.w.workerSettled(new Set(['handoff-tool']));
-  await until(async () => (await f.entry()).closeJob.state === 'closed');
+  await f.waitForJob('closed');
   assert.equal(f.closes.length, 1);
   assert.deepEqual(f.wire.filter(m => ['handoff_report', 'close_ready', 'close_commit'].includes(m.kind)).map(m => m.kind), ['handoff_report', 'close_ready', 'close_commit']);
   f.w.workerSettled(new Set(['handoff-tool'])); await pause(); assert.equal(f.closes.length, 1);
@@ -151,7 +177,7 @@ test('summary temporary-file sync crossing deadline cannot publish a late handof
   await started;
   await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(job.deadlineAt) - Date.now()) + 20));
   release(); await rejected;
-  await until(async () => (await f.entry()).closeJob.state === 'timed_out');
+  await f.waitForJob('timed_out');
   assert.equal((await f.entry()).handoff, undefined); assert.equal(f.closes.length, 0);
 });
 
@@ -168,13 +194,13 @@ test('new turn before commit ACK rejects closure', async t => {
   worker = f.w;
   const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool']));
-  await until(async () => (await f.entry()).closeJob.state === 'failed');
+  await f.waitForJob('failed');
   assert.equal((await f.entry()).closeJob.reason, 'commit_rejected'); assert.equal(f.closes.length, 0);
 });
 
 test('deadline never forces close; coordinator reload interrupts pending jobs without replay', async t => {
   const f = await fixture(t, { timeout: 120 }); const job = await f.request(); await f.prepared();
-  await until(async () => (await f.entry()).closeJob.state === 'timed_out');
+  await f.waitForJob('timed_out');
   assert.equal(f.closes.length, 0);
   await assert.rejects(f.w.tool('report_handoff', { jobId: job.jobId, summary: 'too late' }, 'late-tool'));
   const g = await fixture(t); await g.request(); await g.prepared();
@@ -192,7 +218,7 @@ test('worker runtime replacement rejects stale commit instance', async t => {
   worker = f.w;
   const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool']));
-  await until(async () => (await f.entry()).closeJob.state === 'failed');
+  await f.waitForJob('failed');
   assert.equal(f.closes.length, 0);
 });
 
@@ -200,7 +226,7 @@ test('unverified close is uncertain, persists summary and fences retry/resume th
   const f = await fixture(t, { outcome: { paneClosed: true, workerExited: false } });
   const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool']));
-  await until(async () => (await f.entry()).closeJob.state === 'uncertain');
+  await f.waitForJob('uncertain');
   await f.c.close(); await f.c.start();
   await assert.rejects(f.request());
   await assert.rejects(f.c.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /fenced/);
@@ -213,14 +239,14 @@ test('coordinator reload with closing intent becomes uncertain and cannot replay
   const f = await fixture(t, { provider: { close: async (_p, _id, guard, beforeSubmit) => { guard(); await gate; guard(); await beforeSubmit(); return { paneClosed: true, workerExited: true }; } } });
   const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool']));
-  await until(async () => (await f.entry()).closeJob.state === 'closing');
+  await f.waitForJob('closing');
   await f.c.close(); await f.c.start(); release();
   assert.equal((await f.entry()).closeJob.state, 'uncertain'); await assert.rejects(f.request());
 });
 
 test('same-ID reconfigure preserves handoff and closed job; validators reject private fields', async t => {
   const f = await fixture(t); const job = await f.request(); await f.prepared(); await f.report(job);
-  f.w.workerSettled(new Set(['handoff-tool'])); await until(async () => (await f.entry()).closeJob.state === 'closed');
+  f.w.workerSettled(new Set(['handoff-tool'])); await f.waitForJob('closed');
   await f.c.tool('configure_worker', { sessionId: 'w', port: f.w.endpoint.port, projectDirectory: '.', name: 'Renamed', description: 'New responsibility' });
   assert.equal((await f.entry()).handoff.jobId, job.jobId); assert.equal((await f.entry()).closeJob.state, 'closed');
   const config = await f.c.store.read(); config.agents.find(a => a.sessionId === 'w').closeJob.identity = identity;
@@ -238,7 +264,7 @@ test('new work during final provider inspection rejects last-moment commit befor
   const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool'])); await started;
   f.w.workerStarted(); release();
-  await until(async () => (await f.entry()).closeJob.state === 'failed');
+  await f.waitForJob('failed');
   assert.equal((await f.entry()).closeJob.reason, 'commit_rejected'); assert.equal(actualCloses, 0);
 });
 
