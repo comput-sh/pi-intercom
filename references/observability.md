@@ -58,9 +58,9 @@ Activity phases are `working`, `thinking`, `responding`, `tool`, `idle`. Details
 
 Checks expire to unknown after 30 seconds. Monitor batches rotate to avoid starvation; skipped checks may retain previous unexpired evidence. Saved-port changes/removal invalidate cached checks. Shared classification/sorting preserves config order within connected-or-unknown and disconnected groups. UI selection follows session ID across these order changes.
 
-Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. Connectivity monitoring never automatically closes, retries, restarts or assigns work. An explicit close request (0.6.0) may separately initiate the handoff workflow described below.
+Closing a worker does not remove config. Explicit resume uses the saved session ID, name and responsibility and requires user-confirmed closure (`confirmClosed:true`). A live matching health endpoint rejects duplicate resume. In-flight/uncertain submissions are fenced within this coordinator runtime until a later configured status announcement; preflight announcements do not qualify, and uncertain launch errors preserve the fence. Config/identity/lifecycle are rechecked before launch. These safeguards do not guarantee cross-process uniqueness, survive coordinator restart or certify OS process death. Connectivity monitoring never automatically closes, retries, restarts or assigns work. An explicit close request (0.6.1) may separately initiate the handoff workflow described below.
 
-## Public handoff and background pane-close jobs (0.6.0)
+## Public handoff and background pane-close jobs (0.6.1)
 
 `Agent.handoff` saves only `{version, jobId, summary, updatedAt}`; the summary is explicitly public worker-authored context, at most 4000 characters. `Agent.closeJob` stores bounded workflow ID/state/timestamps and a fixed reason. Both remain alongside registration after a close. No PID, private session path, terminal ID or readiness nonce is saved in these public config fields. Config validation rejects extra metadata fields; snapshot/status views explicitly project supported fields. Old saved handoffs may precede a newer failed close job; they are not merged or treated as current acceptance.
 
@@ -68,7 +68,7 @@ Explicit `close_worker` returns acceptance while the coordinator extension conti
 
 Closing intent is durable before mutation. After final Linux Herdr pane/session/PID/start-identity checks, a nonce-bound worker commit is checked immediately before one pane-close command. No summary alone, timeout, save failure or busy/stale worker permits a close. Job deadlines are checked again at config publication and before pane mutation. Failed/uncertain outcomes preserve registration/handoff. Interrupted jobs are not replayed after reload; closing intent recovers as uncertain.
 
-The monitor and JSON status expose public handoff age and close workflow separately from connectivity/activity/reports. `closed` means this workflow verified pane absence and original worker-process exit; it does not certify all descendants terminated. The workflow is available in 0.6.0 for Linux Herdr only. See README for retained race/flush limits and operator recovery requirements.
+The monitor and JSON status expose public handoff age and close workflow separately from connectivity/activity/reports. `closed` means this workflow verified pane absence and original worker-process exit; it does not certify all descendants terminated. The workflow is available in npm 0.6.1 for Linux Herdr only. See README for retained race/flush limits and operator recovery requirements.
 
 ## Read-only JSON status
 

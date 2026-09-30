@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, rename, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Intercom } from '../dist/runtime.js';
@@ -40,12 +40,118 @@ async function setup(t) {
   t.after(async () => { for (const r of all) await r.close(); await rm(root, { recursive: true, force: true }); });
   return { start, endpoints, wire, launches, root };
 }
+async function publicationFixture(t, options) {
+  const root = await mkdtemp(path.join(tmpdir(), 'intercom-publication-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const counts = { writes: 0, syncs: 0, closes: 0, mutations: 0 };
+  class CountingStore extends ConfigStore {
+    async openTemporary(file) {
+      const handle = await super.openTemporary(file);
+      return {
+        writeFile: async (...args) => { counts.writes++; return handle.writeFile(...args); },
+        sync: async () => { counts.syncs++; return handle.sync(); },
+        close: async () => { counts.closes++; return handle.close(); },
+      };
+    }
+  }
+  const store = new CountingStore(root, options);
+  await store.initialize('c', 12345);
+  counts.writes = counts.syncs = counts.closes = 0;
+  const original = await readFile(store.file, 'utf8');
+  const mutate = config => { counts.mutations++; config.agents[0].description = 'updated'; };
+  const assertOriginalAndClean = async () => {
+    assert.equal(await readFile(store.file, 'utf8'), original);
+    assert.deepEqual(await readdir(path.dirname(store.file)), ['config.json']);
+  };
+  return { store, counts, mutate, assertOriginalAndClean };
+}
 async function configured(t) {
   const f = await setup(t), c = await f.start('c'), w = await f.start('w');
   await c.runtime.tool('configure_worker', { sessionId: 'w', port: w.runtime.endpoint.port, projectDirectory: '.', name: 'Builder', description: 'Build assigned tasks' });
   await c.runtime.tool('reload_worker', { to: 'Builder' });
   return { ...f, c, w };
 }
+test('Windows EPERM publication retries only the same closed temp with fresh guards', async t => {
+  let clock = 0;
+  const calls = [], delays = [], events = [];
+  const permission = Object.assign(new Error('sharing conflict'), { code: 'EPERM' });
+  const f = await publicationFixture(t, { platform: 'win32', now: () => clock,
+    delay: async ms => { events.push('delay'); delays.push(ms); clock += ms; },
+    rename: async (from, to) => {
+      assert.equal(events.at(-1), 'guard');
+      assert.deepEqual(f.counts, { writes: 1, syncs: 1, closes: 1, mutations: 1 });
+      calls.push([from, to]);
+      if (calls.length < 3) throw permission;
+      await rename(from, to);
+    },
+  });
+  await f.store.update('c', f.mutate, () => events.push('guard'));
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(call => call[0] === calls[0][0] && call[1] === f.store.file));
+  assert.deepEqual(delays, [10, 20]);
+  assert.equal((await f.store.read()).agents[0].description, 'updated');
+  assert.deepEqual(await readdir(path.dirname(f.store.file)), ['config.json']);
+});
+
+test('Windows permanent EPERM exhausts five attempts and preserves original config/error with temp cleanup', async t => {
+  let clock = 0, attempts = 0;
+  const delays = [];
+  const original = Object.assign(new Error('first sharing conflict'), { code: 'EPERM' });
+  const f = await publicationFixture(t, { platform: 'win32', now: () => clock,
+    delay: async ms => { delays.push(ms); clock += ms; },
+    rename: async () => { attempts++; throw attempts === 1 ? original : Object.assign(new Error('later conflict'), { code: 'EPERM' }); },
+  });
+  await assert.rejects(f.store.update('c', f.mutate), error => error === original);
+  assert.equal(attempts, 5); assert.deepEqual(delays, [10, 20, 40, 80]);
+  assert.deepEqual(f.counts, { writes: 1, syncs: 1, closes: 1, mutations: 1 });
+  await f.assertOriginalAndClean();
+});
+
+test('publication never retries non-EPERM errors or non-Windows EPERM', async t => {
+  for (const [platform, code] of [['win32', 'EACCES'], ['win32', 'EIO'], ['linux', 'EPERM']]) {
+    let attempts = 0;
+    const failure = Object.assign(new Error('non-retryable'), { code });
+    const f = await publicationFixture(t, { platform,
+      rename: async () => { attempts++; throw failure; }, delay: async () => assert.fail('must not back off'),
+    });
+    await assert.rejects(f.store.update('c', f.mutate), error => error === failure);
+    assert.equal(attempts, 1); await f.assertOriginalAndClean();
+  }
+});
+
+test('lifecycle guard invalidated during publication backoff prevents the next attempt', async t => {
+  let active = true, attempts = 0, clock = 0;
+  const lifecycle = Object.assign(new Error('lifecycle replaced'), { code: 'EPERM' });
+  const f = await publicationFixture(t, { platform: 'win32', now: () => clock,
+    rename: async () => { attempts++; throw Object.assign(new Error('sharing conflict'), { code: 'EPERM' }); },
+    delay: async ms => { clock += ms; active = false; },
+  });
+  await assert.rejects(f.store.update('c', f.mutate, () => { if (!active) throw lifecycle; }), error => error === lifecycle);
+  assert.equal(attempts, 1); await f.assertOriginalAndClean();
+});
+
+test('publication retry elapsed budget prevents another rename after an overslept backoff', async t => {
+  let attempts = 0, clock = 0, delays = 0;
+  const failure = Object.assign(new Error('sharing conflict'), { code: 'EPERM' });
+  const f = await publicationFixture(t, { platform: 'win32', now: () => clock,
+    rename: async () => { attempts++; throw failure; },
+    delay: async () => { delays++; clock += 300; },
+  });
+  await assert.rejects(f.store.update('c', f.mutate), error => error === failure);
+  assert.equal(attempts, 1); assert.equal(delays, 1); await f.assertOriginalAndClean();
+});
+
+test('a distinct non-EPERM during retry immediately propagates without further attempts', async t => {
+  let attempts = 0, clock = 0;
+  const finalError = Object.assign(new Error('disk failure'), { code: 'EIO' });
+  const f = await publicationFixture(t, { platform: 'win32', now: () => clock,
+    rename: async () => { attempts++; throw attempts === 1 ? Object.assign(new Error('sharing conflict'), { code: 'EPERM' }) : finalError; },
+    delay: async ms => { clock += ms; },
+  });
+  await assert.rejects(f.store.update('c', f.mutate), error => error === finalError);
+  assert.equal(attempts, 2); await f.assertOriginalAndClean();
+});
+
 test('anonymous registration explicitly hands ID/port/directory to agent, configure writes only, reload passive', async t => {
   const f = await setup(t), c = await f.start('c');
   assert.equal(c.messages.length, 0); assert.deepEqual(c.names, []);

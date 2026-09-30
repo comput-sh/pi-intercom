@@ -68,10 +68,19 @@ export async function directory(root: string, requested: string): Promise<string
   if (!(await stat(target)).isDirectory()) fail('projectDirectory is not a directory');
   return rel.split(path.sep).join('/') || '.';
 }
+export interface ConfigStoreOptions {
+  /** Publication seams for deterministic platform/race tests. */
+  platform?: NodeJS.Platform;
+  rename?: (from: string, to: string) => Promise<void>;
+  delay?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
+}
+const RENAME_DELAYS = [10, 20, 40, 80] as const;
+const RENAME_BUDGET_MS = 250;
 export class ConfigStore {
   readonly file: string;
   private tail: Promise<unknown> = Promise.resolve();
-  constructor(readonly root: string) { this.file = path.join(root, '.pi-intercom', 'config.json'); }
+  constructor(readonly root: string, private readonly options: ConfigStoreOptions = {}) { this.file = path.join(root, '.pi-intercom', 'config.json'); }
   async read(): Promise<Config> {
     // Missing, malformed and unreadable files propagate; never overwrite them.
     return validateConfig(JSON.parse(await readFile(this.file, 'utf8')));
@@ -118,6 +127,29 @@ export class ConfigStore {
       await unlink(temp); return true;
     } catch (error) { await unlink(temp).catch(() => {}); throw error; }
   }
+  private async publish(temp: string, assertValid: () => void): Promise<void> {
+    const replace = this.options.rename ?? rename;
+    const now = this.options.now ?? (() => performance.now());
+    const delay = this.options.delay ?? (milliseconds => new Promise<void>(resolve => setTimeout(resolve, milliseconds)));
+    const started = now();
+    let originalError: unknown;
+    for (let attempt = 0; ; attempt++) {
+      // Windows readers can briefly deny replace-rename. Retry only publication
+      // of this already synced/closed temp, never the mutation or any OS action
+      // outside config persistence. The elapsed budget bounds retry initiation,
+      // not the duration of an already-submitted OS rename.
+      assertValid();
+      if (attempt > 0 && now() - started >= RENAME_BUDGET_MS) throw originalError;
+      try { await replace(temp, this.file); return; }
+      catch (error) {
+        if ((this.options.platform ?? process.platform) !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+        originalError ??= error;
+        const backoff = RENAME_DELAYS[attempt];
+        if (backoff === undefined || now() - started + backoff >= RENAME_BUDGET_MS) throw originalError;
+        await delay(backoff);
+      }
+    }
+  }
   async update(id: string, mutate: (config: Config) => void | Promise<void>, assertValid: () => void = () => {}): Promise<Config> {
     const operation = this.tail.then(async () => {
       assertValid();
@@ -125,8 +157,9 @@ export class ConfigStore {
       await mutate(c); assertValid(); validateConfig(c);
       const temp = await this.temporary(c);
       try {
-        // Last check before publication; an already submitted OS rename cannot be undone.
-        assertValid(); await rename(temp, this.file);
+        // Every publication attempt checks the lifecycle/deadline guard; an
+        // already submitted OS rename still cannot be undone.
+        await this.publish(temp, assertValid);
       } catch (error) { await unlink(temp).catch(() => {}); throw error; }
       return c;
     });

@@ -26,7 +26,7 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 >
-> **0.6.0:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
+> **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
 
@@ -66,7 +66,7 @@ Open Pi inside a Herdr workspace at the project root you want to coordinate, or 
 
 ### Know the boundaries
 
-- **Graceful stop remains disabled.** Pi 0.84.4's cancellation behavior leaves retry continuations alive; newer versions are not assumed safe without verification. The Linux Herdr `close_worker` in 0.6.0 has a different contract: request/save a handoff, await final settlement, then attempt an identity-checked external pane close. It does not use Pi abort/shutdown or promise all descendants terminate. Manual closure remains available. See the [cancellation blocker](references/implementation-blocker.md).
+- **Graceful stop remains disabled.** Pi 0.84.4's cancellation behavior leaves retry continuations alive; newer versions are not assumed safe without verification. The Linux Herdr `close_worker` in 0.6.1 has a different contract: request/save a handoff, await final settlement, then attempt an identity-checked external pane close. It does not use Pi abort/shutdown or promise all descendants terminate. Manual closure remains available. See the [cancellation blocker](references/implementation-blocker.md).
 - **No silent recovery.** Intercom does not automatically retry messages, replace workers, switch launchers, commit changes, or roll them back.
 - **Local, not remote.** Messaging binds to loopback. Local processes are trusted; this is not an authenticated service for untrusted clients.
 
@@ -172,7 +172,7 @@ HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 K
 {"version":1,"kind":"message","from":"sender-session-id","to":"expected-recipient-session-id","payload":{"message":"explicit message"}}
 ```
 
-Handoff wire kinds (0.6.0): `close_prepare`, `close_identity`, `close_request`, `handoff_report`, `close_ready`, `close_commit`. These require configured roles, matching job/runtime identity and bounded validated payloads. Pane/process identity is ephemeral protocol data, never stored in public config or summaries.
+Handoff wire kinds (0.6.1): `close_prepare`, `close_identity`, `close_request`, `handoff_report`, `close_ready`, `close_commit`. These require configured roles, matching job/runtime identity and bounded validated payloads. Pane/process identity is ephemeral protocol data, never stored in public config or summaries.
 
 Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
 
@@ -204,7 +204,7 @@ After the user confirms the previous session is closed, call `intercom_resume_wo
 
 `intercom_remove_worker` is only for forgetting the saved registration, not parking a worker. Graceful stop remains disabled; see the background close workflow below. Reload coordinator/workers and restart the standalone monitor to use the new health protocol/UI; these additions require 0.5.1.
 
-### Background save-and-close (0.6.0)
+### Background save-and-close (0.6.1)
 
 On supported **Linux + Herdr**, `intercom_close_worker({to:"Builder"})` returns a persisted job ID/state promptly. It does not hold the coordinator model turn open waiting for the worker. The extension performs these steps in the background:
 
@@ -279,13 +279,16 @@ The workflow validates on Windows and Linux, then publishes with provenance from
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
 
-### 0.6.0 Background handoff-and-close and quiet startup
+### 0.6.1 Background handoff-and-close and quiet startup
+
+- First npm release of these features: the preserved 0.6.0 GitHub tag failed Windows validation and was not published to npm.
+- Windows config publication handles transient `EPERM` replacement failures with bounded filesystem-only attempts and lifecycle/deadline checks before each attempt. Worker close commands, messages and jobs are never retried by this safeguard.
 
 - Explicit Linux Herdr close jobs request and save a public worker handoff, await final settlement, then attempt one identity-checked pane close in the background. Worker registration, responsibility and session ID remain saved.
 - Persist latest handoff and close-job status in config; show them in monitor details and JSON worker status. Correlation, deadlines, lifecycle guards and uncertainty fences prevent automatic replay.
 - Empty rosters do not open/check the monitor; configuring the first worker triggers setup. Disconnected saved workers still count.
 - Preserve the coordinator's existing Pi session name and Herdr tab title; worker naming remains synchronized.
-- Local validation: typecheck, 164 tests and isolated package-install check passed. An isolated ordinary-process pane-close check passed on Linux Herdr 0.9.1; full live Pi handoff/history and Windows pane termination are not claimed.
+- Validation includes typecheck, workflow/platform regression tests and isolated package installation. An isolated ordinary-process pane-close check passed on Linux Herdr 0.9.1; full live Pi handoff/history and Windows pane termination are not claimed.
 - Upgrade coordinator/workers and restart the monitor. Close is Linux Herdr only, not graceful Pi abort or an all-descendants termination guarantee. Config-root discovery and connectivity polling architecture are unchanged.
 
 ### 0.5.2 Monitor version footer
