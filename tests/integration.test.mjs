@@ -218,12 +218,37 @@ test('work reports reject anonymous/unloaded/coordinator senders, worker destina
   }
   assert.deepEqual(await readWorkerReports(root, ['w']), []);
 });
-test('report updates serialize, ignore payload identity and keep stored report if notification fails', async t => {
+test('report updates serialize, ignore payload identity and keep stored report if notification fails', { timeout: 5000 }, async t => {
   const { c, w, root } = await configured(t);
-  await Promise.all([
-    w.runtime.tool('report_work', { status: 'blocked', summary: 'first' }),
-    w.runtime.tool('report_work', { status: 'clear' }),
-  ]);
+  const state = c.runtime.state.bind(c.runtime);
+  let calls = 0, releaseFirst, firstQueued, secondReceived, secondCompleted = false;
+  const gate = new Promise(resolve => { releaseFirst = resolve; });
+  const queued = new Promise(resolve => { firstQueued = resolve; });
+  const received = new Promise(resolve => { secondReceived = resolve; });
+  c.runtime.state = async () => {
+    const call = ++calls;
+    // First receive authorizes at call 1. Its admitted report then performs
+    // this fresh state check inside the serialized write callback (call 2).
+    if (call === 2) { firstQueued(); await gate; }
+    const result = await state();
+    if (call === 3) secondReceived();
+    return result;
+  };
+  t.after(() => { releaseFirst(); c.runtime.state = state; });
+  const first = w.runtime.tool('report_work', { status: 'blocked', summary: 'first' });
+  await queued;
+  const second = w.runtime.tool('report_work', { status: 'clear' }).then(value => { secondCompleted = true; return value; });
+  try {
+    await received;
+    // Let the second receive finish admission, while the first write stays
+    // blocked. This is an event-loop boundary, not a timing/order guess.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(c.runtime.pendingReports, 2, 'both receipts must be admitted concurrently');
+    assert.equal(secondCompleted, false, 'second receipt must await the first queued write');
+    assert.deepEqual(await readWorkerReports(root, ['w']), []);
+  } finally { releaseFirst(); }
+  await Promise.all([first, second]);
+  c.runtime.state = state;
   assert.equal((await readWorkerReports(root, ['w']))[0].status, 'clear');
   c.host.deliver = () => { throw new Error('notification rejected'); };
   await assert.rejects(c.runtime.receive({ version:1, kind:'report', from:'w', to:'c', payload:{status:'ready_for_review',summary:'public result',sessionId:'c'} }), /Report stored.*notification/);
